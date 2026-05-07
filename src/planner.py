@@ -52,6 +52,8 @@ class PlannerConfig:
     style_rag_dir: str | None = None
     style_rag_top_k: int = 5
     style_rag_bias_weight: float = 0.15
+    classifier_ckpt: str | None = None        # if set, use trained model
+                                              # for technique selection
 
 
 @dataclass
@@ -102,7 +104,8 @@ def transition_score(prev_clip: dict, prev_seg: dict, prev_target_bpm: float,
                      weights: dict,
                      style_rag: StyleRAG | None = None,
                      rag_top_k: int = 5,
-                     rag_bias_weight: float = 0.15) -> tuple[float, dict, bool]:
+                     rag_bias_weight: float = 0.15,
+                     classifier_ckpt: str | None = None) -> tuple[float, dict, bool]:
     """Returns (score, technique_dict, is_surprise)."""
     cand_bpm = cand_clip.get('tempo', prev_target_bpm)
     cand_bpm = cand_bpm if cand_bpm > 0 else prev_target_bpm
@@ -150,6 +153,16 @@ def transition_score(prev_clip: dict, prev_seg: dict, prev_target_bpm: float,
         tech = {'name': 'crossfade', 'bars': 16}
     else:
         tech = {'name': 'eq_swap', 'bars': 16}
+
+    # Trained classifier overrides decision tree if available.
+    if classifier_ckpt:
+        try:
+            from training.integrate import pick_technique
+            tech = pick_technique(prev_clip, prev_seg, cand_clip, cand_seg,
+                                  ckpt_path=classifier_ckpt,
+                                  default_bars=tech.get('bars', 16))
+        except Exception as e:
+            print(f"warn: classifier pick failed ({e}), using rule tree")
 
     # Style-RAG bias: query reference patterns, bonus for techniques used in
     # similar transition contexts. Optional.
@@ -289,6 +302,7 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
                     style_rag=rag,
                     rag_top_k=config.style_rag_top_k,
                     rag_bias_weight=config.style_rag_bias_weight,
+                    classifier_ckpt=config.classifier_ckpt,
                 )
                 if is_surprise and st.surprises_used >= config.surprise_budget:
                     continue
@@ -398,6 +412,8 @@ if __name__ == '__main__':
     ap.add_argument('--max_clips', type=int, default=20)
     ap.add_argument('--style_rag', default=None,
                     help='reference dir for Style-RAG bias (optional)')
+    ap.add_argument('--classifier', default=None,
+                    help='path to trained technique classifier .pt (optional)')
     args = ap.parse_args()
     clips = load_clips(args.cache)
     if not clips:
@@ -409,6 +425,7 @@ if __name__ == '__main__':
         callback_budget=args.callbacks,
         max_clips=args.max_clips,
         style_rag_dir=args.style_rag,
+        classifier_ckpt=args.classifier,
     )
     tl = plan(clips, cfg)
     save_timeline(tl, args.out)

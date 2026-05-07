@@ -27,6 +27,10 @@ references/*.json
 # Claude Code personal settings
 .claude/
 
+# training artifacts
+datasets/
+checkpoints/
+
 # editor
 .vscode/
 .idea/
