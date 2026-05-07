@@ -27,8 +27,10 @@ references/*.json
 # Claude Code personal settings
 .claude/
 
-# training artifacts
-datasets/
+# training artifacts (raw audio + features) — but keep tracklist JSONs (just URLs+timestamps)
+datasets/raw_mixes/
+datasets/transitions_real/
+datasets/synthetic_transitions.npz
 checkpoints/
 
 # editor

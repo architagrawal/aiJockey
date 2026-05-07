@@ -15,3 +15,5 @@ scipy>=1.11
 numpy<2.0
 cython<3
 tqdm
+yt-dlp>=2024.1.0
+beautifulsoup4>=4.12.0
