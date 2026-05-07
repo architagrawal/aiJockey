@@ -104,6 +104,10 @@ Or A/B without flag = rule-based fallback.
 
 - **Tier 1.1**: improve synthetic scoring (add CLAP coherence, key continuity, FAD vs published-DJ-set reference)
 - **Tier 1.2**: weak labels from real DJ mixes (Tier 3 dataset doubles as Tier 1.2 source — `technique_guess` field auto-labels)
+- **Tier 1.5** ✅ DONE: CLAP DJ-compatibility projection head (`clap_pairs.py` +
+  `clap_finetune.py`). Contrastive InfoNCE loss on synthetic compatible/incompatible
+  pairs. Replaces raw CLAP cosine in planner with projected-space cosine.
+  Notebook: `scripts/train_clap_compat.ipynb`. Plumbed via `--compat_head` flag.
 
 ---
 

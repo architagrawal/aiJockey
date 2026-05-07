@@ -52,8 +52,10 @@ class PlannerConfig:
     style_rag_dir: str | None = None
     style_rag_top_k: int = 5
     style_rag_bias_weight: float = 0.15
-    classifier_ckpt: str | None = None        # if set, use trained model
-                                              # for technique selection
+    classifier_ckpt: str | None = None        # technique classifier ckpt
+    compat_head_ckpt: str | None = None       # CLAP compat head ckpt
+                                              # (Tier 1.5 — projects CLAP into
+                                              #  DJ-compatibility space)
     restricted: bool = True                   # demo-safe technique whitelist
                                               # + multi-genre BPM/key filter
 
@@ -121,8 +123,12 @@ def transition_score(prev_clip: dict, prev_seg: dict, prev_target_bpm: float,
     in_e = float(cand_seg.get('energy', 0.5))
     energy_score = 1.0 - min(1.0, abs(out_e - in_e) * 2.0)
 
-    a = _normalize_clap(np.asarray(prev_clip.get('clap', np.zeros(512)), dtype=np.float32))
-    b = _normalize_clap(np.asarray(cand_clip.get('clap', np.zeros(512)), dtype=np.float32))
+    a_raw = np.asarray(prev_clip.get('clap', np.zeros(512)), dtype=np.float32)
+    b_raw = np.asarray(cand_clip.get('clap', np.zeros(512)), dtype=np.float32)
+    # Use 'compat' projection if pre-computed (set by plan() when ckpt provided),
+    # else fall back to raw normalized CLAP cosine.
+    a = _normalize_clap(prev_clip.get('compat', a_raw))
+    b = _normalize_clap(cand_clip.get('compat', b_raw))
     timbre_score = float(a @ b) if a.size == b.size and a.size > 0 else 0.0
     variety_score = 1.0 - timbre_score if timbre_score > 0.95 else 1.0
 
@@ -249,6 +255,22 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
         else:
             print(f"Style-RAG: no patterns found in {config.style_rag_dir}, skipping bias")
             rag = None
+
+    # Optional CLAP compat head (Tier 1.5) — pre-project all clip CLAPs once
+    if config.compat_head_ckpt:
+        try:
+            import numpy as _np
+            from training.clap_finetune import load_compat_head, project_batch
+            head = load_compat_head(config.compat_head_ckpt)
+            ids = list(clips.keys())
+            claps = _np.stack([clips[c]['clap'] for c in ids]).astype(_np.float32)
+            projected = project_batch(head, claps)
+            for cid, p in zip(ids, projected):
+                clips[cid]['compat'] = p
+            print(f"CLAP compat head: projected {len(ids)} clips into "
+                  f"{projected.shape[1]}-dim DJ-compat space")
+        except Exception as e:
+            print(f"warn: compat head load/project failed ({e}), using raw CLAP")
 
     # Initial states — try each clip as opener
     starts: list[State] = []
@@ -425,6 +447,8 @@ if __name__ == '__main__':
                     help='reference dir for Style-RAG bias (optional)')
     ap.add_argument('--classifier', default=None,
                     help='path to trained technique classifier .pt (optional)')
+    ap.add_argument('--compat_head', default=None,
+                    help='path to CLAP compat head .pt (Tier 1.5, optional)')
     args = ap.parse_args()
     clips = load_clips(args.cache)
     if not clips:
@@ -437,6 +461,7 @@ if __name__ == '__main__':
         max_clips=args.max_clips,
         style_rag_dir=args.style_rag,
         classifier_ckpt=args.classifier,
+        compat_head_ckpt=args.compat_head,
     )
     tl = plan(clips, cfg)
     save_timeline(tl, args.out)

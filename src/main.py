@@ -43,6 +43,7 @@ def cmd_plan(args: argparse.Namespace) -> None:
         max_clips=args.max_clips,
         style_rag_dir=args.style_rag,
         classifier_ckpt=args.classifier,
+        compat_head_ckpt=args.compat_head,
     )
     tl = plan(clips, cfg)
     save_timeline(tl, args.out)
@@ -88,6 +89,7 @@ def cmd_all(args: argparse.Namespace) -> None:
         max_clips=args.max_clips,
         style_rag_dir=args.style_rag,
         classifier_ckpt=args.classifier,
+        compat_head_ckpt=args.compat_head,
     )
     tl = plan(clips, cfg)
     timeline_path = str(out_dir / 'timeline.json')
@@ -124,6 +126,8 @@ def main() -> None:
                    help='reference dir for Style-RAG bias (optional)')
     p.add_argument('--classifier', default=None,
                    help='path to trained technique classifier .pt (optional)')
+    p.add_argument('--compat_head', default=None,
+                   help='path to CLAP compat head .pt (Tier 1.5, optional)')
     p.set_defaults(func=cmd_plan)
 
     p = sub.add_parser('execute')
@@ -162,6 +166,8 @@ def main() -> None:
                    help='reference dir for Style-RAG bias (optional)')
     p.add_argument('--classifier', default=None,
                    help='path to trained technique classifier .pt (optional)')
+    p.add_argument('--compat_head', default=None,
+                   help='path to CLAP compat head .pt (Tier 1.5, optional)')
     p.set_defaults(func=cmd_all)
 
     args = ap.parse_args()
