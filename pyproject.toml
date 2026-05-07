@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aijockey"
+version = "0.0.1"
+description = "AI DJ set generator with pro-DJ transition library"
+requires-python = ">=3.10"
+readme = "README.md"
+license = {text = "AGPL-3.0-or-later"}
+
+[project.scripts]
+aijockey = "main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = [
+    "analyze", "camelot", "hooks", "phrase", "planner",
+    "transitions", "execute", "master", "eval", "main",
+    "style_rag", "samples", "synth_fx", "clap_wrapper",
+]

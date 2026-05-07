@@ -1,0 +1,17 @@
+demucs==4.0.1
+# madmom: 0.16.1 wheel doesn't build on Python 3.12+. Install via:
+#   pip install --no-build-isolation git+https://github.com/CPJKU/madmom.git
+# (cython<3 + numpy<2 must be installed first)
+madmom @ git+https://github.com/CPJKU/madmom.git
+librosa==0.10.2
+soundfile==0.12.1
+pyrubberband>=0.4.0
+pyloudnorm==0.1.1
+# CLAP backend: laion-clap preferred but fails to build on Python 3.12.
+# Fallback uses transformers.ClapModel (same model). clap_wrapper.py picks one.
+transformers>=4.30.0
+laion-clap==1.1.4 ; python_version < "3.12"
+scipy>=1.11
+numpy<2.0
+cython<3
+tqdm

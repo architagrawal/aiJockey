@@ -1,0 +1,34 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# audio + data (user-supplied, often large)
+clips/
+cache/
+output/
+tests/fixtures/
+
+# samples: ignore audio files, keep README + manifest stub
+samples/**/*.wav
+samples/**/*.mp3
+samples/**/*.flac
+samples/**/*.ogg
+samples/**/*.m4a
+
+# references: ignore reference JSON (may contain copyrighted analysis), keep README
+references/*.json
+!references/README.md
+
+# Claude Code personal settings
+.claude/
+
+# editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
