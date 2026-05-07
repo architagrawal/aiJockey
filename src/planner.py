@@ -35,21 +35,23 @@ class TimelineEntry:
 
 @dataclass
 class PlannerConfig:
-    target_duration: float = 600.0
+    target_duration: float = 1800.0           # 30 min default
     energy_arc: list[float] = field(
-        default_factory=lambda: [0.3, 0.5, 0.7, 0.9, 1.0, 0.85, 0.6, 0.3])
-    surprise_budget: int = 1
-    callback_budget: int = 1
-    beam_width: int = 12
-    max_clips: int = 20
-    min_clips: int = 3
+        default_factory=lambda: [0.3, 0.5, 0.7, 0.9, 1.0, 0.95, 0.85, 0.6, 0.4, 0.3])
+    surprise_budget: int = 10                 # generous: long sets need surprises
+    callback_budget: int = 2
+    beam_width: int = 16
+    max_clips: int = 200                      # large cap for 30-min mixes
+    min_clips: int = 1                        # don't reject short outputs
+    allow_clip_reuse: bool = True             # reuse clips when pool exhausted
+    clip_reuse_cooldown: int = 2              # min entries between reuses of same clip
     weights: dict = field(default_factory=lambda: dict(
         key=0.25, tempo=0.20, energy=0.20, timbre=0.15,
         variety=0.10, surprise=0.10,
     ))
-    style_rag_dir: str | None = None     # if set, use Style-RAG bias
+    style_rag_dir: str | None = None
     style_rag_top_k: int = 5
-    style_rag_bias_weight: float = 0.15  # max bonus added to score from RAG
+    style_rag_bias_weight: float = 0.15
 
 
 @dataclass
@@ -60,6 +62,9 @@ class State:
     surprises_used: int = 0
     callbacks_used: int = 0
     score: float = 0.0
+    # For reuse: track recent clip uses (cooldown) and per-clip segment usage
+    recent_clip_ids: list[str] = field(default_factory=list)
+    used_segments: dict = field(default_factory=dict)  # clip_id -> set of segment indices
 
 
 # ---------------------------------------------------------------------------
@@ -174,20 +179,32 @@ def transition_score(prev_clip: dict, prev_seg: dict, prev_target_bpm: float,
 # ---------------------------------------------------------------------------
 
 def pick_segment(clip: dict, prefer: str | None = None,
-                 target_energy: float | None = None) -> dict:
+                 target_energy: float | None = None,
+                 exclude_indices: set | None = None) -> tuple[dict, int]:
+    """
+    Returns (segment_dict, segment_index). exclude_indices = section indices already used.
+    Falls back to any section if all excluded.
+    """
     sections = clip.get('sections', [])
     if not sections:
-        return {'start': 0.0, 'end': clip.get('duration', 30.0),
-                'type': 'unknown', 'energy': 0.5}
+        return ({'start': 0.0, 'end': clip.get('duration', 30.0),
+                 'type': 'unknown', 'energy': 0.5}, -1)
+    exclude = exclude_indices or set()
+    available = [(i, s) for i, s in enumerate(sections) if i not in exclude]
+    if not available:
+        # All sections used — allow reuse, but cycle to least-recently
+        available = list(enumerate(sections))
     if prefer:
-        for s in sections:
+        for i, s in available:
             if s.get('type') == prefer:
-                return dict(s)
+                return (dict(s), i)
     if target_energy is not None:
-        return dict(min(sections,
-                        key=lambda s: abs(s.get('energy', 0.5) - target_energy)))
-    body = [s for s in sections if s.get('type') in ('drop', 'verse', 'breakdown')]
-    return dict(max(body or sections, key=lambda s: s['end'] - s['start']))
+        i, s = min(available, key=lambda kv: abs(kv[1].get('energy', 0.5) - target_energy))
+        return (dict(s), i)
+    body = [(i, s) for i, s in available if s.get('type') in ('drop', 'verse', 'breakdown')]
+    pool = body or available
+    i, s = max(pool, key=lambda kv: kv[1]['end'] - kv[1]['start'])
+    return (dict(s), i)
 
 
 # ---------------------------------------------------------------------------
@@ -212,19 +229,23 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
     # Initial states — try each clip as opener
     starts: list[State] = []
     for cid, clip in clips.items():
-        seg = pick_segment(clip, prefer='intro') if any(
-            s.get('type') == 'intro' for s in clip.get('sections', [])
-        ) else pick_segment(clip)
+        sections = clip.get('sections', [])
+        has_intro = any(s.get('type') == 'intro' for s in sections)
+        seg, seg_idx = (pick_segment(clip, prefer='intro')
+                        if has_intro else pick_segment(clip))
         target_bpm = clip.get('tempo', 128.0) or 128.0
         entry = TimelineEntry(
             clip_id=cid, segment=seg, target_bpm=target_bpm,
             target_key=clip.get('key', '?'),
             transition_in={'name': 'fade_in', 'bars': 4},
         )
+        used_segs = {cid: {seg_idx}} if seg_idx >= 0 else {}
         starts.append(State(
             sequence=[entry],
             cumulative_duration=seg['end'] - seg['start'],
             used_clip_ids={cid},
+            recent_clip_ids=[cid],
+            used_segments=used_segs,
             score=0.0,
         ))
 
@@ -245,10 +266,23 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
             target_e = config.energy_arc[arc_idx]
             last = st.sequence[-1]
             last_clip = clips[last.clip_id]
-            for cid, cand in clips.items():
-                if cid in st.used_clip_ids:
-                    continue
-                seg = pick_segment(cand, target_energy=target_e)
+
+            # Build candidate pool. Prefer unused clips. Allow reused with cooldown
+            # if all unused exhausted OR explicitly enabled.
+            unused = [cid for cid in clips if cid not in st.used_clip_ids]
+            cooldown = set(st.recent_clip_ids[-config.clip_reuse_cooldown:])
+            reuse = ([cid for cid in clips
+                      if cid in st.used_clip_ids and cid not in cooldown]
+                     if config.allow_clip_reuse else [])
+            candidate_ids = unused or reuse  # prefer fresh clips
+
+            scored_candidates: list[tuple[float, dict, bool, str, dict, int]] = []
+            for cid in candidate_ids:
+                cand = clips[cid]
+                seg, seg_idx = pick_segment(
+                    cand, target_energy=target_e,
+                    exclude_indices=st.used_segments.get(cid, set()),
+                )
                 score, tech, is_surprise = transition_score(
                     last_clip, last.segment, last.target_bpm, last.target_key,
                     cand, seg, config.weights,
@@ -258,6 +292,30 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
                 )
                 if is_surprise and st.surprises_used >= config.surprise_budget:
                     continue
+                scored_candidates.append((score, tech, is_surprise, cid, seg, seg_idx))
+
+            # If nothing passed surprise filter, force-add best candidate anyway
+            # (better to make progress than die at 1 clip).
+            if not scored_candidates and candidate_ids:
+                cid = candidate_ids[0]
+                cand = clips[cid]
+                seg, seg_idx = pick_segment(
+                    cand, target_energy=target_e,
+                    exclude_indices=st.used_segments.get(cid, set()),
+                )
+                score, tech, _ = transition_score(
+                    last_clip, last.segment, last.target_bpm, last.target_key,
+                    cand, seg, config.weights,
+                    style_rag=rag,
+                    rag_top_k=config.style_rag_top_k,
+                    rag_bias_weight=config.style_rag_bias_weight,
+                )
+                scored_candidates.append((score, tech, True, cid, seg, seg_idx))
+
+            for score, tech, is_surprise, cid, seg, seg_idx in scored_candidates:
+                new_used_segs = {k: set(v) for k, v in st.used_segments.items()}
+                if seg_idx >= 0:
+                    new_used_segs.setdefault(cid, set()).add(seg_idx)
                 new_entry = TimelineEntry(
                     clip_id=cid, segment=seg,
                     target_bpm=last.target_bpm,
@@ -268,6 +326,8 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
                     sequence=st.sequence + [new_entry],
                     cumulative_duration=st.cumulative_duration + (seg['end'] - seg['start']),
                     used_clip_ids=st.used_clip_ids | {cid},
+                    recent_clip_ids=(st.recent_clip_ids + [cid])[-10:],
+                    used_segments=new_used_segs,
                     surprises_used=st.surprises_used + (1 if is_surprise else 0),
                     callbacks_used=st.callbacks_used,
                     score=st.score + score,
@@ -275,10 +335,17 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
         beam = sorted(next_beam, key=lambda s: -s.score)[:config.beam_width]
 
     if not finished:
-        finished = sorted(starts, key=lambda s: -s.score)[:1]
+        # Fallback: use best partial, even if didn't reach target_duration
         if beam:
             finished = sorted(beam, key=lambda s: -s.score)[:1]
-    best = max(finished, key=lambda s: s.score / max(1, len(s.sequence)))
+        else:
+            finished = sorted(starts, key=lambda s: -s.score)[:1]
+    # Pick best by total score (not normalized by length — we want long mixes)
+    best = max(finished, key=lambda s: s.score)
+    print(f"plan: {len(best.sequence)} entries, "
+          f"{best.cumulative_duration:.1f}s "
+          f"(target {config.target_duration:.0f}s), "
+          f"surprises_used={best.surprises_used}")
 
     # Insert callback (Loop Callback technique) — repeat strongest hook later in set
     if config.callback_budget > 0 and len(best.sequence) > 4:
@@ -325,7 +392,7 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--cache', default='cache')
     ap.add_argument('--out', default='output/timeline.json')
-    ap.add_argument('--duration', type=float, default=600.0)
+    ap.add_argument('--duration', type=float, default=1800.0)
     ap.add_argument('--surprises', type=int, default=1)
     ap.add_argument('--callbacks', type=int, default=1)
     ap.add_argument('--max_clips', type=int, default=20)
