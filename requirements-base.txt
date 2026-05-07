@@ -17,3 +17,4 @@ cython<3
 tqdm
 yt-dlp>=2024.1.0
 beautifulsoup4>=4.12.0
+gradio>=4.0.0

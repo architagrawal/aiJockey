@@ -54,6 +54,8 @@ class PlannerConfig:
     style_rag_bias_weight: float = 0.15
     classifier_ckpt: str | None = None        # if set, use trained model
                                               # for technique selection
+    restricted: bool = True                   # demo-safe technique whitelist
+                                              # + multi-genre BPM/key filter
 
 
 @dataclass
@@ -185,6 +187,15 @@ def transition_score(prev_clip: dict, prev_seg: dict, prev_target_bpm: float,
 
     is_surprise = score < 0.4
     return score, tech, is_surprise
+
+
+def _apply_restricted_filter(tech: dict) -> dict:
+    """Replace artifact-prone techniques with safe fallbacks for demo output."""
+    try:
+        from restricted_mode import filter_technique
+        return filter_technique(tech, restricted=True)
+    except Exception:
+        return tech
 
 
 # ---------------------------------------------------------------------------
