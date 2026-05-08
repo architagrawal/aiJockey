@@ -112,6 +112,27 @@ def _extract_embedding(out):
                        f'attrs: {[a for a in dir(out) if not a.startswith("_")]}')
 
 
+def get_text_embedding(text: str | list[str]) -> np.ndarray:
+    """
+    Compute CLAP text embedding(s) for natural-language prompts.
+    Returns (N, 512) — same space as audio embeddings, cosine-comparable.
+    """
+    load_clap()
+    texts = [text] if isinstance(text, str) else list(text)
+    if _BACKEND == 'laion':
+        emb = _MODEL.get_text_embedding(texts, use_tensor=False)
+        return np.asarray(emb, dtype=np.float32)
+    # transformers backend
+    import torch
+    inputs = _PROCESSOR(text=texts, return_tensors='pt', padding=True)
+    if torch.cuda.is_available():
+        inputs = {k: v.cuda() for k, v in inputs.items()}
+    with torch.no_grad():
+        out = _MODEL.get_text_features(**inputs)
+    emb = _extract_embedding(out)
+    return emb.cpu().numpy().astype(np.float32)
+
+
 class CLAP_Module:
     """
     Drop-in shim for laion_clap.CLAP_Module — same interface, uses whichever

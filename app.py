@@ -64,7 +64,8 @@ def stage_uploads(files: list) -> list[str]:
 
 
 def run_pipeline(files, duration_min, use_classifier, ckpt_path,
-                 lufs, restricted_mode, progress=gr.Progress()) -> tuple[str, str, str, str]:
+                 lufs, restricted_mode, text_prompt,
+                 progress=gr.Progress()) -> tuple[str, str, str, str]:
     """
     Run end-to-end pipeline.
     Returns (final_mix_wav_path, raw_mix_wav_path, timeline_pretty, status).
@@ -94,6 +95,7 @@ def run_pipeline(files, duration_min, use_classifier, ckpt_path,
         callback_budget=1,
         max_clips=200,
         restricted=restricted_mode,
+        text_prompt=text_prompt.strip() if text_prompt and text_prompt.strip() else None,
     )
     if use_classifier and ckpt_path and os.path.exists(ckpt_path):
         cfg_kwargs['classifier_ckpt'] = ckpt_path
@@ -184,6 +186,12 @@ def build_ui() -> gr.Blocks:
                     label='Restricted (demo-safe) mode — drops artifact-prone techniques',
                     value=True,
                 )
+                text_prompt = gr.Textbox(
+                    label='Mix vibe (optional, natural language)',
+                    placeholder='e.g. "uplifting trance peak-time" or '
+                                '"chill sunset session with deep house"',
+                    lines=2,
+                )
                 btn = gr.Button('Generate Mix', variant='primary')
             with gr.Column(scale=1):
                 status = gr.Textbox(label='Status', interactive=False, lines=2)
@@ -206,7 +214,7 @@ def build_ui() -> gr.Blocks:
         btn.click(
             fn=run_pipeline,
             inputs=[files, duration_min, use_classifier, ckpt_path,
-                    lufs, restricted_mode],
+                    lufs, restricted_mode, text_prompt],
             outputs=[final_audio, raw_audio, timeline_box, status],
         )
 

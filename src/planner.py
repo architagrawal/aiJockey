@@ -53,6 +53,9 @@ class PlannerConfig:
     style_rag_dir: str | None = None
     style_rag_top_k: int = 5
     style_rag_bias_weight: float = 0.15
+    text_prompt: str | None = None            # natural-language mix description;
+                                              # CLAP-cosine-biases clip selection
+    text_prompt_weight: float = 0.20          # how much text match influences score
     classifier_ckpt: str | None = None        # technique classifier ckpt
     compat_head_ckpt: str | None = None       # CLAP compat head ckpt
                                               # (Tier 1.5 — projects CLAP into
@@ -196,6 +199,19 @@ def transition_score(prev_clip: dict, prev_seg: dict, prev_target_bpm: float,
     return score, tech, is_surprise
 
 
+def _arc_slope_at(arc: list[float], progress: float) -> float:
+    """
+    Slope of target energy arc at given normalized progress (0..1).
+    Returns delta to next arc point. Used to match section energy gradient
+    against where we expect the mix's energy to be heading.
+    """
+    if not arc or len(arc) < 2:
+        return 0.0
+    n = len(arc)
+    idx = min(int(progress * (n - 1)), n - 2)
+    return float(arc[idx + 1] - arc[idx])
+
+
 def _apply_restricted_filter(tech: dict) -> dict:
     """Replace artifact-prone techniques with safe fallbacks for demo output."""
     try:
@@ -263,6 +279,20 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
         else:
             print(f"Style-RAG: no patterns found in {config.style_rag_dir}, skipping bias")
             rag = None
+
+    # Optional text prompt — embed once, used to bias clip selection
+    text_emb_norm = None
+    if config.text_prompt:
+        try:
+            import numpy as _np
+            from clap_wrapper import get_text_embedding
+            t_emb = get_text_embedding(config.text_prompt)[0].astype(_np.float32)
+            n = float(_np.linalg.norm(t_emb))
+            text_emb_norm = t_emb / n if n > 0 else t_emb
+            print(f"text prompt: '{config.text_prompt[:60]}' "
+                  f"(weight={config.text_prompt_weight})")
+        except Exception as e:
+            print(f"warn: text prompt embedding failed ({e}), ignoring")
 
     # Optional CLAP compat head (Tier 1.5) — pre-project all clip CLAPs once
     if config.compat_head_ckpt:
@@ -348,6 +378,22 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
                     rag_bias_weight=config.style_rag_bias_weight,
                     classifier_ckpt=config.classifier_ckpt,
                 )
+                # Text-prompt bias (Option A): cosine of candidate's CLAP vs prompt
+                if text_emb_norm is not None:
+                    cand_clap = np.asarray(cand.get('clap', np.zeros(512)),
+                                           dtype=np.float32)
+                    n = float(np.linalg.norm(cand_clap))
+                    if n > 0:
+                        cand_norm = cand_clap / n
+                        prompt_match = float(cand_norm @ text_emb_norm)
+                        score += config.text_prompt_weight * prompt_match
+                # Phrase-aware energy slope match (Option C):
+                target_slope = _arc_slope_at(config.energy_arc, progress)
+                section_slope = (seg.get('energy', 0.5)
+                                 - last.segment.get('energy', 0.5))
+                slope_diff = abs(target_slope - section_slope)
+                slope_match = max(0.0, 1.0 - slope_diff)
+                score += 0.10 * slope_match
                 if is_surprise and st.surprises_used >= config.surprise_budget:
                     continue
                 scored_candidates.append((score, tech, is_surprise, cid, seg, seg_idx))
@@ -461,6 +507,9 @@ if __name__ == '__main__':
                     help='path to trained technique classifier .pt (optional)')
     ap.add_argument('--compat_head', default=None,
                     help='path to CLAP compat head .pt (Tier 1.5, optional)')
+    ap.add_argument('--prompt', default=None,
+                    help='natural-language mix description, e.g. '
+                         '"uplifting trance peak-time set"')
     args = ap.parse_args()
     clips = load_clips(args.cache)
     if not clips:
@@ -474,6 +523,7 @@ if __name__ == '__main__':
         style_rag_dir=args.style_rag,
         classifier_ckpt=args.classifier,
         compat_head_ckpt=args.compat_head,
+        text_prompt=args.prompt,
     )
     tl = plan(clips, cfg)
     save_timeline(tl, args.out)
