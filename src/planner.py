@@ -103,6 +103,18 @@ def load_clips(cache_dir: str) -> dict[str, dict]:
         else:
             d['clap'] = np.zeros(512, dtype=np.float32)
             d['energy_arr'] = np.zeros(0, dtype=np.float32)
+        # Normalize section energies per-clip to 0..1 (raw librosa RMS is
+        # often ~0.05-0.3; arc presets are 0..1 — without rescaling, arc
+        # comparisons saturate). Each clip's loudest section becomes 1.0.
+        sections = d.get('sections', [])
+        if sections:
+            energies = [s.get('energy', 0.0) for s in sections]
+            peak = max(energies) if energies else 0.0
+            if peak > 0:
+                for s in sections:
+                    raw = s.get('energy', 0.0)
+                    s['energy_raw'] = raw            # keep original
+                    s['energy'] = raw / peak         # 0..1 normalized
         out[jp.stem] = d
     return out
 
