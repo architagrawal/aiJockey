@@ -44,7 +44,8 @@ class PlannerConfig:
     max_clips: int = 200                      # large cap for 30-min mixes
     min_clips: int = 1                        # don't reject short outputs
     allow_clip_reuse: bool = True             # reuse clips when pool exhausted
-    clip_reuse_cooldown: int = 2              # min entries between reuses of same clip
+    clip_reuse_cooldown: int = 5              # min entries between reuses of same clip
+    min_segment_seconds: float = 30.0         # skip sections shorter than this
     weights: dict = field(default_factory=lambda: dict(
         key=0.25, tempo=0.20, energy=0.20, timbre=0.15,
         variety=0.10, surprise=0.10,
@@ -210,20 +211,27 @@ def _apply_restricted_filter(tech: dict) -> dict:
 
 def pick_segment(clip: dict, prefer: str | None = None,
                  target_energy: float | None = None,
-                 exclude_indices: set | None = None) -> tuple[dict, int]:
+                 exclude_indices: set | None = None,
+                 min_seconds: float = 30.0) -> tuple[dict, int]:
     """
-    Returns (segment_dict, segment_index). exclude_indices = section indices already used.
-    Falls back to any section if all excluded.
+    Returns (segment_dict, segment_index). Filters sections shorter than
+    min_seconds. Falls back to longest available if all too short.
     """
     sections = clip.get('sections', [])
     if not sections:
         return ({'start': 0.0, 'end': clip.get('duration', 30.0),
                  'type': 'unknown', 'energy': 0.5}, -1)
     exclude = exclude_indices or set()
-    available = [(i, s) for i, s in enumerate(sections) if i not in exclude]
+    # Filter sections by min duration
+    long_enough = [(i, s) for i, s in enumerate(sections)
+                   if (s['end'] - s['start']) >= min_seconds]
+    available = [(i, s) for i, s in long_enough if i not in exclude]
     if not available:
-        # All sections used — allow reuse, but cycle to least-recently
-        available = list(enumerate(sections))
+        # No long enough remaining — fall back to longest section regardless
+        if long_enough:
+            available = long_enough
+        else:
+            available = list(enumerate(sections))  # last resort, allow short
     if prefer:
         for i, s in available:
             if s.get('type') == prefer:
@@ -277,8 +285,10 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
     for cid, clip in clips.items():
         sections = clip.get('sections', [])
         has_intro = any(s.get('type') == 'intro' for s in sections)
-        seg, seg_idx = (pick_segment(clip, prefer='intro')
-                        if has_intro else pick_segment(clip))
+        seg, seg_idx = (pick_segment(clip, prefer='intro',
+                                     min_seconds=config.min_segment_seconds)
+                        if has_intro else
+                        pick_segment(clip, min_seconds=config.min_segment_seconds))
         target_bpm = clip.get('tempo', 128.0) or 128.0
         entry = TimelineEntry(
             clip_id=cid, segment=seg, target_bpm=target_bpm,
@@ -328,6 +338,7 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
                 seg, seg_idx = pick_segment(
                     cand, target_energy=target_e,
                     exclude_indices=st.used_segments.get(cid, set()),
+                    min_seconds=config.min_segment_seconds,
                 )
                 score, tech, is_surprise = transition_score(
                     last_clip, last.segment, last.target_bpm, last.target_key,
@@ -349,6 +360,7 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
                 seg, seg_idx = pick_segment(
                     cand, target_energy=target_e,
                     exclude_indices=st.used_segments.get(cid, set()),
+                    min_seconds=config.min_segment_seconds,
                 )
                 score, tech, _ = transition_score(
                     last_clip, last.segment, last.target_bpm, last.target_key,
