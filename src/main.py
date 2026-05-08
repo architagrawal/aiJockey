@@ -41,6 +41,7 @@ def cmd_plan(args: argparse.Namespace) -> None:
         surprise_budget=args.surprises,
         callback_budget=args.callbacks,
         max_clips=args.max_clips,
+        min_unique_clips=getattr(args, 'min_unique_clips', 5),
         style_rag_dir=args.style_rag,
         classifier_ckpt=args.classifier,
         compat_head_ckpt=args.compat_head,
@@ -88,6 +89,7 @@ def cmd_all(args: argparse.Namespace) -> None:
         surprise_budget=args.surprises,
         callback_budget=args.callbacks,
         max_clips=args.max_clips,
+        min_unique_clips=getattr(args, 'min_unique_clips', 5),
         style_rag_dir=args.style_rag,
         classifier_ckpt=args.classifier,
         compat_head_ckpt=args.compat_head,
@@ -124,6 +126,8 @@ def main() -> None:
     p.add_argument('--surprises', type=int, default=10)
     p.add_argument('--callbacks', type=int, default=1)
     p.add_argument('--max_clips', type=int, default=200)
+    p.add_argument('--min_unique_clips', type=int, default=5,
+                   help='min distinct clips that must appear in mix')
     p.add_argument('--style_rag', default=None,
                    help='reference dir for Style-RAG bias (optional)')
     p.add_argument('--classifier', default=None,
@@ -165,6 +169,8 @@ def main() -> None:
     p.add_argument('--surprises', type=int, default=10)
     p.add_argument('--callbacks', type=int, default=1)
     p.add_argument('--max_clips', type=int, default=200)
+    p.add_argument('--min_unique_clips', type=int, default=5,
+                   help='min distinct clips that must appear in mix')
     p.add_argument('--lufs', type=float, default=-9.0)
     p.add_argument('--style_rag', default=None,
                    help='reference dir for Style-RAG bias (optional)')

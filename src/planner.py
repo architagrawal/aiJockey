@@ -42,7 +42,8 @@ class PlannerConfig:
     callback_budget: int = 2
     beam_width: int = 16
     max_clips: int = 200                      # large cap for 30-min mixes
-    min_clips: int = 1                        # don't reject short outputs
+    min_clips: int = 1                        # min total entries (allows callbacks)
+    min_unique_clips: int = 5                 # min distinct clips that must appear
     allow_clip_reuse: bool = True             # reuse clips when pool exhausted
     clip_reuse_cooldown: int = 5              # min entries between reuses of same clip
     min_segment_seconds: float = 30.0         # skip sections shorter than this
@@ -349,11 +350,22 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
     while beam:
         next_beam: list[State] = []
         for st in beam:
-            if (st.cumulative_duration >= config.target_duration
-                    or len(st.sequence) >= config.max_clips):
-                if len(st.sequence) >= config.min_clips:
+            n_unique = len(st.used_clip_ids)
+            duration_met = st.cumulative_duration >= config.target_duration
+            cap_hit = len(st.sequence) >= config.max_clips
+            if duration_met or cap_hit:
+                # Only finish if min_unique_clips satisfied (or max_clips cap hit)
+                if (n_unique >= config.min_unique_clips
+                        and len(st.sequence) >= config.min_clips):
                     finished.append(st)
-                continue
+                    continue
+                # Duration met but not enough unique clips — keep extending
+                # (loop will try to add more clips)
+                if cap_hit:
+                    if len(st.sequence) >= config.min_clips:
+                        finished.append(st)
+                    continue
+                # else: fall through to expansion below
             progress = st.cumulative_duration / config.target_duration
             arc_idx = min(int(progress * len(config.energy_arc)),
                           len(config.energy_arc) - 1)
@@ -509,6 +521,8 @@ if __name__ == '__main__':
     ap.add_argument('--surprises', type=int, default=1)
     ap.add_argument('--callbacks', type=int, default=1)
     ap.add_argument('--max_clips', type=int, default=20)
+    ap.add_argument('--min_unique_clips', type=int, default=5,
+                    help='minimum distinct clips that must appear in mix')
     ap.add_argument('--style_rag', default=None,
                     help='reference dir for Style-RAG bias (optional)')
     ap.add_argument('--classifier', default=None,
@@ -528,6 +542,7 @@ if __name__ == '__main__':
         surprise_budget=args.surprises,
         callback_budget=args.callbacks,
         max_clips=args.max_clips,
+        min_unique_clips=args.min_unique_clips,
         style_rag_dir=args.style_rag,
         classifier_ckpt=args.classifier,
         compat_head_ckpt=args.compat_head,
