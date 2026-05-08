@@ -55,7 +55,7 @@ class PlannerConfig:
     style_rag_bias_weight: float = 0.15
     text_prompt: str | None = None            # natural-language mix description;
                                               # CLAP-cosine-biases clip selection
-    text_prompt_weight: float = 0.20          # how much text match influences score
+    text_prompt_weight: float = 1.5           # strong bias — overrides genre/timbre defaults
     classifier_ckpt: str | None = None        # technique classifier ckpt
     compat_head_ckpt: str | None = None       # CLAP compat head ckpt
                                               # (Tier 1.5 — projects CLAP into
@@ -326,13 +326,21 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
             transition_in={'name': 'fade_in', 'bars': 4},
         )
         used_segs = {cid: {seg_idx}} if seg_idx >= 0 else {}
+        # Opener score: apply text-prompt bias if set, so opener also matches vibe
+        opener_score = 0.0
+        if text_emb_norm is not None:
+            cand_clap = np.asarray(clip.get('clap', np.zeros(512)), dtype=np.float32)
+            n_clap = float(np.linalg.norm(cand_clap))
+            if n_clap > 0:
+                opener_score = config.text_prompt_weight * float(
+                    (cand_clap / n_clap) @ text_emb_norm)
         starts.append(State(
             sequence=[entry],
             cumulative_duration=seg['end'] - seg['start'],
             used_clip_ids={cid},
             recent_clip_ids=[cid],
             used_segments=used_segs,
-            score=0.0,
+            score=opener_score,
         ))
 
     beam = sorted(starts, key=lambda s: -s.score)[:config.beam_width]
