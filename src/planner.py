@@ -36,8 +36,16 @@ class TimelineEntry:
 @dataclass
 class PlannerConfig:
     target_duration: float = 1800.0           # 30 min default
+    # Energy arc = the planner's PLAN. AI decides shape based on intent.
+    # Presets:
+    #   'build':     low → peak → cooldown (default warm-up set)
+    #   'peak':      start high, sustain, slight cooldown
+    #   'rollercoaster': oscillating peaks/valleys
+    #   'descend':   cooldown set
+    # Override via energy_arc (list of floats) directly.
     energy_arc: list[float] = field(
         default_factory=lambda: [0.3, 0.5, 0.7, 0.9, 1.0, 0.95, 0.85, 0.6, 0.4, 0.3])
+    arc_shape: str = 'build'                  # 'build' | 'peak' | 'rollercoaster' | 'descend' | 'custom'
     surprise_budget: int = 10                 # generous: long sets need surprises
     callback_budget: int = 2
     beam_width: int = 16
@@ -200,6 +208,22 @@ def transition_score(prev_clip: dict, prev_seg: dict, prev_target_bpm: float,
     return score, tech, is_surprise
 
 
+ARC_PRESETS = {
+    'build':         [0.3, 0.5, 0.7, 0.9, 1.0, 0.95, 0.85, 0.6, 0.4, 0.3],
+    'peak':          [0.85, 0.95, 1.0, 1.0, 0.95, 0.9, 0.85, 0.8, 0.7, 0.6],
+    'rollercoaster': [0.4, 0.85, 0.55, 0.95, 0.5, 1.0, 0.6, 0.85, 0.4, 0.3],
+    'descend':       [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.45, 0.4, 0.35, 0.3],
+    'flat_high':     [0.85, 0.9, 0.9, 0.95, 0.95, 0.9, 0.9, 0.85, 0.85, 0.8],
+    'flat_low':      [0.35, 0.4, 0.4, 0.45, 0.45, 0.4, 0.4, 0.35, 0.35, 0.3],
+}
+
+
+def resolve_arc(shape: str, custom: list[float] | None = None) -> list[float]:
+    if custom and shape == 'custom':
+        return list(custom)
+    return ARC_PRESETS.get(shape, ARC_PRESETS['build'])
+
+
 def _arc_slope_at(arc: list[float], progress: float) -> float:
     """
     Slope of target energy arc at given normalized progress (0..1).
@@ -271,6 +295,13 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
     if not clips:
         return []
 
+    # Resolve arc shape (preset name -> values). 'custom' uses config.energy_arc as-is.
+    if config.arc_shape != 'custom':
+        config.energy_arc = resolve_arc(config.arc_shape)
+    print(f"arc shape: {config.arc_shape}, "
+          f"start={config.energy_arc[0]:.2f}, peak={max(config.energy_arc):.2f}, "
+          f"end={config.energy_arc[-1]:.2f}")
+
     # Optional Style-RAG index
     rag = None
     if config.style_rag_dir:
@@ -311,15 +342,17 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
         except Exception as e:
             print(f"warn: compat head load/project failed ({e}), using raw CLAP")
 
-    # Initial states — try each clip as opener
+    # Opener selection: pick section + clip matching arc[0] (the planner's
+    # decision about where the mix STARTS). Low arc[0] -> warmup-style opener.
+    # High arc[0] -> banger-from-the-jump opener. Arc shape is configurable;
+    # not assumed to start low.
+    target_e_open = config.energy_arc[0] if config.energy_arc else 0.3
     starts: list[State] = []
     for cid, clip in clips.items():
-        sections = clip.get('sections', [])
-        has_intro = any(s.get('type') == 'intro' for s in sections)
-        seg, seg_idx = (pick_segment(clip, prefer='intro',
-                                     min_seconds=config.min_segment_seconds)
-                        if has_intro else
-                        pick_segment(clip, min_seconds=config.min_segment_seconds))
+        seg, seg_idx = pick_segment(
+            clip, target_energy=target_e_open,
+            min_seconds=config.min_segment_seconds,
+        )
         target_bpm = clip.get('tempo', 128.0) or 128.0
         entry = TimelineEntry(
             clip_id=cid, segment=seg, target_bpm=target_bpm,
@@ -327,13 +360,15 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
             transition_in={'name': 'fade_in', 'bars': 4},
         )
         used_segs = {cid: {seg_idx}} if seg_idx >= 0 else {}
-        # Opener score: apply text-prompt bias if set, so opener also matches vibe
-        opener_score = 0.0
+        # Opener score: energy-match-to-arc-start + prompt cosine
+        seg_e = float(seg.get('energy', 0.5))
+        energy_match = 1.0 - min(1.0, abs(seg_e - target_e_open) * 2.0)
+        opener_score = 0.30 * energy_match
         if text_emb_norm is not None:
             cand_clap = np.asarray(clip.get('clap', np.zeros(512)), dtype=np.float32)
             n_clap = float(np.linalg.norm(cand_clap))
             if n_clap > 0:
-                opener_score = config.text_prompt_weight * float(
+                opener_score += config.text_prompt_weight * float(
                     (cand_clap / n_clap) @ text_emb_norm)
         starts.append(State(
             sequence=[entry],
@@ -532,6 +567,9 @@ if __name__ == '__main__':
     ap.add_argument('--prompt', default=None,
                     help='natural-language mix description, e.g. '
                          '"uplifting trance peak-time set"')
+    ap.add_argument('--arc', default='build',
+                    choices=list(ARC_PRESETS.keys()) + ['custom'],
+                    help='energy arc shape: build|peak|rollercoaster|descend|flat_high|flat_low')
     args = ap.parse_args()
     clips = load_clips(args.cache)
     if not clips:
@@ -547,6 +585,7 @@ if __name__ == '__main__':
         classifier_ckpt=args.classifier,
         compat_head_ckpt=args.compat_head,
         text_prompt=args.prompt,
+        arc_shape=args.arc,
     )
     tl = plan(clips, cfg)
     save_timeline(tl, args.out)

@@ -42,6 +42,7 @@ def cmd_plan(args: argparse.Namespace) -> None:
         callback_budget=args.callbacks,
         max_clips=args.max_clips,
         min_unique_clips=getattr(args, 'min_unique_clips', 5),
+        arc_shape=getattr(args, 'arc', 'build'),
         style_rag_dir=args.style_rag,
         classifier_ckpt=args.classifier,
         compat_head_ckpt=args.compat_head,
@@ -90,6 +91,7 @@ def cmd_all(args: argparse.Namespace) -> None:
         callback_budget=args.callbacks,
         max_clips=args.max_clips,
         min_unique_clips=getattr(args, 'min_unique_clips', 5),
+        arc_shape=getattr(args, 'arc', 'build'),
         style_rag_dir=args.style_rag,
         classifier_ckpt=args.classifier,
         compat_head_ckpt=args.compat_head,
@@ -128,6 +130,10 @@ def main() -> None:
     p.add_argument('--max_clips', type=int, default=200)
     p.add_argument('--min_unique_clips', type=int, default=5,
                    help='min distinct clips that must appear in mix')
+    p.add_argument('--arc', default='build',
+                   choices=['build', 'peak', 'rollercoaster',
+                            'descend', 'flat_high', 'flat_low', 'custom'],
+                   help='energy arc shape (planner intent)')
     p.add_argument('--style_rag', default=None,
                    help='reference dir for Style-RAG bias (optional)')
     p.add_argument('--classifier', default=None,
@@ -171,6 +177,10 @@ def main() -> None:
     p.add_argument('--max_clips', type=int, default=200)
     p.add_argument('--min_unique_clips', type=int, default=5,
                    help='min distinct clips that must appear in mix')
+    p.add_argument('--arc', default='build',
+                   choices=['build', 'peak', 'rollercoaster',
+                            'descend', 'flat_high', 'flat_low', 'custom'],
+                   help='energy arc shape (planner intent)')
     p.add_argument('--lufs', type=float, default=-9.0)
     p.add_argument('--style_rag', default=None,
                    help='reference dir for Style-RAG bias (optional)')
