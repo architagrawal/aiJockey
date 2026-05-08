@@ -27,6 +27,11 @@ references/*.json
 # Claude Code personal settings
 .claude/
 
+# Local-only scripts (not for public push — copyright caution)
+scripts/bulk_download_clips.py
+clips_test/
+clips_demo/
+
 # training artifacts (raw audio + features) — but keep tracklist JSONs (just URLs+timestamps)
 datasets/raw_mixes/
 datasets/transitions_real/
