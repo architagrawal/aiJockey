@@ -1,7 +1,7 @@
 """HF Space: AiJockey demo + password-gated live generation.
 
-Public tab: 5 pre-baked demo mixes (MP3 in repo).
-Try It tab: password gate -> upload 3-6 clips + pick preset -> calls MI300X tunnel.
+Public tab: 5 pre-baked demo mixes.
+Try It tab: password gate -> upload 2-8 clips, vibe preset, length, optional library, advanced.
 
 Required Space secrets:
   ADMIN_PW       admin password for Try It tab
@@ -9,7 +9,7 @@ Required Space secrets:
   MI300X_KEY     shared secret matching SERVER_KEY on droplet
 """
 from __future__ import annotations
-import os, hmac, requests, tempfile
+import os, hmac, requests, tempfile, math
 from pathlib import Path
 import gradio as gr
 
@@ -27,6 +27,12 @@ PRESETS = {
     "East Meets Bass":        ("east_meets_bass",       "Sitar + tabla over deep electronic bass."),
     "Bollywood Block Party":  ("bollywood_block_party", "Bollywood + Punjabi + drill mash."),
 }
+ARCS = ["build", "peak", "rollercoaster", "descend", "flat_high", "flat_low"]
+LUFS_OPTIONS = {"streaming (-14)": -14, "club (-9)": -9, "competition (-6)": -6}
+
+MIN_CLIPS, MAX_CLIPS = 2, 8
+MIN_DURATION = 30
+MAX_DURATION_HARD = 600
 
 
 def check_pw(pw: str):
@@ -38,36 +44,81 @@ def check_pw(pw: str):
     )
 
 
-def call_backend(files, preset_label: str, duration: int):
+def _probe_total_duration(file_paths) -> float:
+    """Best-effort duration sum on the Space side. Uses soundfile if available."""
+    if not file_paths:
+        return 0.0
+    total = 0.0
+    try:
+        import soundfile as sf
+        for p in file_paths:
+            try:
+                info = sf.info(p)
+                total += info.frames / info.samplerate
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return total
+
+
+def update_duration_bounds(files, use_library):
+    """Recompute duration slider max when uploads change."""
+    paths = [f.name if hasattr(f, "name") else f for f in (files or [])]
+    total = _probe_total_duration(paths)
+    if use_library:
+        max_dur = MAX_DURATION_HARD
+    else:
+        max_dur = max(MIN_DURATION, min(MAX_DURATION_HARD, int(total))) if total else MIN_DURATION
+    default = min(180, max_dur)
+    info_text = f"Uploaded total: {total:.1f}s · slider max: {max_dur}s · library: {'on' if use_library else 'off'}"
+    return gr.update(minimum=MIN_DURATION, maximum=max_dur, value=default), info_text
+
+
+def call_backend(files, preset_label, duration, use_library,
+                 advanced_on, custom_prompt, custom_arc, seed, lufs_label):
     if not MI300X_URL or not MI300X_KEY:
         return None, "Backend not configured. Set MI300X_URL + MI300X_KEY in Space secrets."
     if not files:
-        return None, "Upload 3-6 audio clips."
-    if not (3 <= len(files) <= 6):
-        return None, f"Need 3-6 clips, got {len(files)}."
+        return None, f"Upload {MIN_CLIPS}-{MAX_CLIPS} audio clips."
+    if not (MIN_CLIPS <= len(files) <= MAX_CLIPS):
+        return None, f"Need {MIN_CLIPS}-{MAX_CLIPS} clips, got {len(files)}."
 
     slug = PRESETS[preset_label][0]
     multipart = []
     for f in files:
         path = f.name if hasattr(f, "name") else f
         multipart.append(("files", (Path(path).name, open(path, "rb"), "audio/wav")))
-    data = {"preset": slug, "duration": str(duration)}
-    headers = {"X-Key": MI300X_KEY}
 
+    data = {
+        "preset": slug,
+        "duration": str(int(duration)),
+        "use_library": "true" if use_library else "false",
+        "lufs": str(LUFS_OPTIONS.get(lufs_label, -9)),
+    }
+    if advanced_on:
+        if custom_prompt and custom_prompt.strip():
+            data["prompt"] = custom_prompt.strip()
+        if custom_arc:
+            data["arc"] = custom_arc
+        if seed is not None and str(seed).strip() != "":
+            try:
+                data["seed"] = str(int(seed))
+            except Exception:
+                pass
+
+    headers = {"X-Key": MI300X_KEY}
     try:
-        r = requests.post(
-            f"{MI300X_URL}/generate",
-            data=data, files=multipart, headers=headers, timeout=600,
-        )
+        r = requests.post(f"{MI300X_URL}/generate",
+                          data=data, files=multipart, headers=headers, timeout=900)
     except requests.exceptions.RequestException as e:
         return None, f"Backend unreachable: {e}. Droplet may be destroyed (idle)."
-
     if r.status_code != 200:
-        return None, f"Error {r.status_code}: {r.text[:300]}"
+        return None, f"Error {r.status_code}: {r.text[:400]}"
 
     out = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
     out.write(r.content); out.close()
-    return out.name, f"Generated. Preset: {preset_label}. Length: {duration}s."
+    return out.name, f"OK · preset={preset_label} · duration={int(duration)}s · library={use_library}"
 
 
 def health_check():
@@ -82,7 +133,8 @@ def health_check():
 
 with gr.Blocks(title="AiJockey", theme=gr.themes.Soft()) as app:
     gr.Markdown("# AiJockey — open-source AI DJ\n"
-                "Stems → beats → CLAP → planner → mastered mix. AGPL-3.0.")
+                "Stems → beats → CLAP → planner → mastered mix. AGPL-3.0. "
+                "Running on AMD MI300X.")
 
     with gr.Tab("Demo"):
         gr.Markdown("Five pre-baked mixes from the same engine, different intent. "
@@ -106,32 +158,57 @@ with gr.Blocks(title="AiJockey", theme=gr.themes.Soft()) as app:
             unlock = gr.Button("Unlock")
             err = gr.Markdown()
         with gr.Group(visible=False) as panel:
-            gr.Markdown("Upload 3-6 audio clips (mp3/wav, ≤25MB each, ≤5min each).")
-            files = gr.File(file_count="multiple",
-                            file_types=["audio"],
-                            label="Your clips (3-6)")
-            preset = gr.Dropdown(list(PRESETS), value="Festival Inferno",
-                                 label="Vibe preset")
-            duration = gr.Radio([90, 180, 300], value=180,
-                                label="Mix length (seconds)")
-            health_btn = gr.Button("Check backend")
-            health_out = gr.Markdown()
+            gr.Markdown(f"Upload {MIN_CLIPS}-{MAX_CLIPS} audio clips (mp3/wav/flac/m4a/ogg, ≤25 MB each).")
+            files = gr.File(file_count="multiple", file_types=["audio"],
+                            label=f"Your clips ({MIN_CLIPS}-{MAX_CLIPS})")
+
+            with gr.Row():
+                preset = gr.Dropdown(list(PRESETS), value="Festival Inferno",
+                                     label="Vibe preset")
+                lufs = gr.Dropdown(list(LUFS_OPTIONS), value="club (-9)",
+                                   label="Loudness target")
+
+            duration = gr.Slider(minimum=MIN_DURATION, maximum=MIN_DURATION,
+                                 value=MIN_DURATION, step=5,
+                                 label="Mix length (seconds)")
+            duration_info = gr.Markdown(f"Uploaded total: 0s · slider max: {MIN_DURATION}s")
+
+            use_library = gr.Checkbox(value=False,
+                label="Use sample library (allow planner to mix in pre-curated clips for variety; optional)")
+
+            with gr.Accordion("Advanced (optional)", open=False):
+                advanced_on = gr.Checkbox(value=False, label="Enable advanced overrides")
+                custom_prompt = gr.Textbox(label="Custom prompt (overrides preset)",
+                                           placeholder="e.g. 'dark techno warehouse, driving kick'")
+                custom_arc = gr.Dropdown(ARCS, value=None, label="Arc shape (overrides preset)")
+                seed = gr.Number(label="Seed (optional, for reproducibility)", precision=0)
+
+            files.change(update_duration_bounds, [files, use_library], [duration, duration_info])
+            use_library.change(update_duration_bounds, [files, use_library], [duration, duration_info])
+
+            with gr.Row():
+                health_btn = gr.Button("Check backend")
+                health_out = gr.Markdown()
+            health_btn.click(health_check, None, health_out)
+
             generate = gr.Button("Generate (uses MI300X credits)", variant="primary")
             out_audio = gr.Audio(label="Output mix")
             status = gr.Markdown()
 
-            health_btn.click(health_check, None, health_out)
-            generate.click(call_backend, [files, preset, duration],
+            generate.click(call_backend,
+                           [files, preset, duration, use_library,
+                            advanced_on, custom_prompt, custom_arc, seed, lufs],
                            [out_audio, status])
 
         unlock.click(check_pw, pw, [panel, gate, err])
 
     with gr.Tab("How it works"):
         gr.Markdown("""
-- **Analyze** — Demucs stems, madmom beats, librosa key/structure, CLAP embedding.
+- **Analyze** — Demucs stems, librosa beats/key/structure, CLAP embedding (per clip, GPU).
 - **Plan** — beam search over clip pool with arc-shape + text-prompt bias.
 - **Execute** — 15 transition techniques (cut, eq_swap, drum_break, mashup, …).
 - **Master** — HP30 → multiband + glue compression → LUFS norm → true-peak limiter.
+- **Library option** — when enabled, planner can blend in pre-analyzed curated clips for variety.
 
 Repo: [github.com/architagrawal/aiJockey](https://github.com/architagrawal/aiJockey) (AGPL-3.0)
 """)
