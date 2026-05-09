@@ -71,6 +71,8 @@ class PlannerConfig:
                                               #  DJ-compatibility space)
     restricted: bool = True                   # demo-safe technique whitelist
                                               # + multi-genre BPM/key filter
+    pool_coherence: float | None = None       # mean pairwise CLAP similarity in pool
+    same_genre_tight_mix: bool = False        # Director: tighten key/tempo vs variety
 
 
 @dataclass
@@ -317,10 +319,37 @@ def pick_segment(clip: dict, prefer: str | None = None,
 # Beam search
 # ---------------------------------------------------------------------------
 
+def compute_pool_coherence(clips: dict[str, dict]) -> float:
+    """Mean pairwise normalized CLAP cosine (0..1). High ≈ homogeneous pool."""
+    ids = list(clips.keys())
+    if len(ids) < 2:
+        return 0.85
+    vecs = []
+    for cid in ids:
+        v = np.asarray(clips[cid].get("clap", np.zeros(512)), dtype=np.float32)
+        n = float(np.linalg.norm(v))
+        vecs.append(v / n if n > 0 else v)
+    sims = []
+    for i in range(len(vecs)):
+        for j in range(i + 1, len(vecs)):
+            sims.append(float(vecs[i] @ vecs[j]))
+    return float(sum(sims) / len(sims)) if sims else 0.0
+
+
 def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
     """Returns timeline as list of dicts (asdict of TimelineEntry)."""
     if not clips:
         return []
+
+    w_eff = dict(config.weights)
+    tight = config.same_genre_tight_mix or (
+        config.pool_coherence is not None and config.pool_coherence >= 0.72
+    )
+    if tight:
+        w_eff["key"] = w_eff.get("key", 0.25) * 1.22
+        w_eff["tempo"] = w_eff.get("tempo", 0.20) * 1.22
+        w_eff["timbre"] = w_eff.get("timbre", 0.15) * 1.08
+        w_eff["variety"] = w_eff.get("variety", 0.10) * 0.82
 
     # Resolve arc shape (preset name -> values). 'custom' uses config.energy_arc as-is.
     if config.arc_shape != 'custom':
@@ -455,7 +484,7 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
                 )
                 score, tech, is_surprise = transition_score(
                     last_clip, last.segment, last.target_bpm, last.target_key,
-                    cand, seg, config.weights,
+                    cand, seg, w_eff,
                     style_rag=rag,
                     rag_top_k=config.style_rag_top_k,
                     rag_bias_weight=config.style_rag_bias_weight,
@@ -502,7 +531,7 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
                 )
                 score, tech, _ = transition_score(
                     last_clip, last.segment, last.target_bpm, last.target_key,
-                    cand, seg, config.weights,
+                    cand, seg, w_eff,
                     style_rag=rag,
                     rag_top_k=config.style_rag_top_k,
                     rag_bias_weight=config.style_rag_bias_weight,
@@ -590,10 +619,53 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
     return [asdict(e) for e in best.sequence]
 
 
-def save_timeline(timeline: list[dict], path: str) -> None:
+def apply_llm_transition_tiers_to_timeline(
+    timeline: list[dict],
+    transition_tiers: list[str],
+) -> None:
+    """Overwrite transition_in from LLM tiers (junction j = timeline[j+1]). In-place."""
+    from transition_mapping import tier_to_technique
+
+    if not timeline:
+        return
+    tiers = list(transition_tiers) if transition_tiers else []
+    if not tiers:
+        return
+    for i in range(1, len(timeline)):
+        j = i - 1
+        tier = tiers[j % len(tiers)]
+        tech = tier_to_technique(tier, j)
+        tech = _apply_restricted_filter(tech)
+        timeline[i]["transition_in"] = tech
+
+
+def attach_accent_hints(timeline: list[dict], accent_hints: list[dict]) -> None:
+    """Map Director accent_hints junction_index → timeline[j+1]['accent_hint']."""
+    if not timeline or not accent_hints:
+        return
+    for hint in accent_hints:
+        ji = hint.get("junction_index")
+        try:
+            ji = int(ji)
+        except (TypeError, ValueError):
+            continue
+        idx = ji + 1
+        if 1 <= idx < len(timeline):
+            timeline[idx]["accent_hint"] = {
+                "fx_category": str(hint.get("fx_category", "hihat_rolls")),
+                "beats": float(hint.get("beats", 2.0)),
+            }
+
+
+def save_timeline(
+    timeline: list[dict], path: str, meta: dict | None = None
+) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, 'w') as f:
-        json.dump({'timeline': timeline}, f, indent=2)
+    payload: dict = {"timeline": timeline}
+    if meta:
+        payload["meta"] = meta
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
 
 
 # ---------------------------------------------------------------------------

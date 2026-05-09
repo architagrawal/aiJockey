@@ -268,6 +268,7 @@ See [AiJockey.md](AiJockey.md) sections "Risks" + "Abandon if" + "Push to Phase 
 
 ## Help
 
+- **AI coding assistants / deploy playbook** → [AGENTS.md](AGENTS.md)
 - Architecture questions → AiJockey.md
 - Stuck on ROCm install → AMD docs at rocm.docs.amd.com
 - audiocraft / Stable Audio Open ROCm issues → check GitHub issues, fall back to CPU for inference if needed

@@ -84,25 +84,53 @@ def run_pipeline(files, duration_min, use_classifier, ckpt_path,
         return None, None, '', f'analyze failed: {e}'
 
     progress(0.55, desc='planning timeline...')
-    from planner import load_clips, plan, save_timeline, PlannerConfig
+    from planner import (
+        PlannerConfig,
+        apply_llm_transition_tiers_to_timeline,
+        attach_accent_hints,
+        compute_pool_coherence,
+        load_clips,
+        plan,
+        save_timeline,
+    )
+    from director import estimate_max_transitions_for_pool, run_director
     clips = load_clips(CACHE_DIR)
     if not clips:
         return None, None, '', 'no analyzed clips after analyze (check clip format)'
 
+    coherence = compute_pool_coherence(clips)
+    secs = float(duration_min) * 60.0
+    user_pt = text_prompt.strip() if text_prompt and text_prompt.strip() else ''
+    tier_n = estimate_max_transitions_for_pool(len(staged), secs)
+    d = run_director(
+        user_prompt=user_pt or 'cohesive DJ set',
+        arc_preset='build',
+        clip_count_estimate=len(staged),
+        coherence_hint=coherence,
+        max_transitions_hint=tier_n,
+        approx_duration_seconds=secs,
+    )
     cfg_kwargs = dict(
-        target_duration=float(duration_min) * 60.0,
-        surprise_budget=10,
-        callback_budget=1,
+        target_duration=secs,
+        surprise_budget=int(d.get('surprise_budget', 10)),
+        callback_budget=int(d.get('callback_budget', 1)),
         max_clips=200,
         restricted=restricted_mode,
-        text_prompt=text_prompt.strip() if text_prompt and text_prompt.strip() else None,
+        text_prompt=d.get('text_prompt') or user_pt or None,
+        arc_shape=str(d.get('arc', 'build')),
+        pool_coherence=coherence,
+        same_genre_tight_mix=bool(d.get('same_genre_tight_mix')),
     )
     if use_classifier and ckpt_path and os.path.exists(ckpt_path):
         cfg_kwargs['classifier_ckpt'] = ckpt_path
     cfg = PlannerConfig(**cfg_kwargs)
     timeline = plan(clips, cfg)
+    if os.environ.get('AIJOCKEY_APPLY_LLM_TIERS', '0').lower() in ('1', 'true', 'yes'):
+        apply_llm_transition_tiers_to_timeline(timeline, d.get('transition_tiers') or [])
+    attach_accent_hints(timeline, d.get('accent_hints') or [])
+    max_stretch = 1.14 if coherence >= 0.58 else 1.08
     timeline_path = os.path.join(OUT_DIR, 'timeline.json')
-    save_timeline(timeline, timeline_path)
+    save_timeline(timeline, timeline_path, meta={'max_stretch_ratio': max_stretch})
 
     progress(0.7, desc='executing transitions...')
     from execute import execute

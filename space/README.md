@@ -23,6 +23,21 @@ Public demo + password-gated live generation backed by AMD MI300X.
 | `MI300X_URL` | secret | `https://issue-slingshot-bobsled.ngrok-free.dev` |
 | `MI300X_KEY` | secret | shared secret matching `SERVER_KEY` on droplet |
 
+## API limits (keep Space UX aligned)
+
+These mirror [server/api.py](../server/api.py):
+
+| Constraint | Value |
+|------------|--------|
+| Clip count | 2–8 |
+| Each file | ≤ 25 MB; extensions `.wav` `.mp3` `.flac` `.m4a` `.ogg` |
+| Requested duration | 30–600 s (slider max may be shorter without **Use sample library**) |
+| One GPU job | `503` if backend busy; retry after ~2 min |
+| Job wall clock | backend default **1200 s** (`AIJOCKEY_JOB_TIMEOUT_SEC`) |
+| Downloads | MP3 default; WAV/FLAC optional (Try It dropdown) |
+
+**AGPL-3.0** — forks / network-hosted variants must remain open source under compatible terms.
+
 ## Repo layout
 
 ```
