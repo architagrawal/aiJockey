@@ -39,13 +39,19 @@ cd "$WORK"
 
 echo "=== [3/6] python deps ==="
 # pre-built image already has PyTorch+ROCm. Add aiJockey extras.
-pip install --quiet --upgrade pip
+pip install --quiet --upgrade pip wheel setuptools
+# pin numpy + scipy versions BEFORE madmom (build constraint)
+pip install --quiet "numpy<1.24" "scipy<1.11" Cython
+# madmom often needs --no-build-isolation due to numpy ABI sensitivity
+pip install --quiet --no-build-isolation madmom || pip install --quiet madmom
 pip install --quiet \
-  demucs madmom librosa soundfile pyrubberband \
+  demucs librosa soundfile pyrubberband \
   transformers accelerate huggingface_hub \
   fastapi uvicorn python-multipart \
-  pyloudnorm "numpy<1.24" scipy
-pip install --quiet --no-deps audiocraft || true
+  pyloudnorm yt-dlp
+# audiocraft optional (only for later fine-tune); disable xformers on ROCm
+pip install --quiet --no-deps audiocraft 2>/dev/null || true
+export XFORMERS_DISABLED=1
 
 echo "=== [4/6] ngrok ==="
 if ! command -v ngrok >/dev/null; then
