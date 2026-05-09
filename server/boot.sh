@@ -10,7 +10,7 @@
 #   DO_API_TOKEN    DigitalOcean API token (for self-destroy on idle)
 #   DROPLET_ID      this droplet's ID (from DO panel)
 #   IDLE_MINUTES    default 15
-#   HARD_CAP_HOURS  default 4
+#   HARD_CAP_HOURS  default 3
 
 set -euo pipefail
 
