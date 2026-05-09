@@ -48,4 +48,50 @@ clips_demo.zip
 
 adminpass.txt
 aijockey-space.txt
-ngrok-authtoken.txt
+NGROK_TOKEN.txt
+DO_API_TOKEN.txt
+ADMIN_PW.txt
+SERVER_KEY.txt
+NGROK_DOMAIN.TXT
+NGROK_DOMAIN.txt
+SSH_KEY_PATH.TXT
+SSH_KEY_PATH.txt
+HF_TOKEN.txt
+
+# secrets / keys / tokens — broad catch-all
+*.pem
+*.key
+*_rsa
+*_ed25519
+*.ppk
+id_*
+known_hosts
+SSH_KEY_PATH.TXT
+*ssh_key*
+*.token
+*token*.txt
+*token*.json
+*secret*.txt
+*secret*.json
+*password*.txt
+*passwd*.txt
+*credentials*
+.env
+.env.*
+*.env
+secrets.*
+config.local.*
+
+# rendered local outputs
+demo_mp3/
+clips_trimmed/
+output/
+hf-space/
+.ngrok2/
+.ngrok/
+
+# OS / logs
+*.log
+nohup.out
+.DS_Store
+Thumbs.db
