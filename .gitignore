@@ -97,3 +97,7 @@ nohup.out
 .DS_Store
 Thumbs.db
 datasets/dj_sets/
+datasets/dj_sets_mp3/
+datasets/critic.npz
+test_clips/
+test_out/

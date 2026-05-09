@@ -785,6 +785,18 @@ def _timeline_quality(timeline: list[dict], clips: dict[str, dict],
     return score, breakdown
 
 
+def _critic_score_audio(critic_ckpt: str | Path, audio_path: str | Path) -> float:
+    """Score a rendered audio file with the trained mix critic. Returns 0..1.
+    Returns -1 if scoring failed (treat as unknown)."""
+    try:
+        sys.path.insert(0, str(Path(__file__).parent / 'training'))
+        from mix_critic import score as critic_score
+        return float(critic_score(Path(critic_ckpt), Path(audio_path)))
+    except Exception as e:
+        print(f"warn: critic score failed: {e}")
+        return -1.0
+
+
 def plan_n_best(clips: dict[str, dict], config: PlannerConfig,
                 cache_dir: str | Path,
                 n_candidates: int = 5,
