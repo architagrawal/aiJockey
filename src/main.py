@@ -32,7 +32,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
 
 
 def cmd_plan(args: argparse.Namespace) -> None:
-    from planner import load_clips, plan, save_timeline, PlannerConfig
+    from planner import load_clips, plan, plan_n_best, save_timeline, PlannerConfig
     clips = load_clips(args.cache)
     if not clips:
         print(f"no analyzed clips in {args.cache}. Run 'analyze' first.")
@@ -49,7 +49,13 @@ def cmd_plan(args: argparse.Namespace) -> None:
         compat_head_ckpt=args.compat_head,
         text_prompt=getattr(args, 'prompt', None),
     )
-    tl = plan(clips, cfg)
+    n_best = getattr(args, 'n_best', 1)
+    if n_best > 1:
+        tl, meta = plan_n_best(clips, cfg, cache_dir=args.cache, n_candidates=n_best)
+        print(f"N-best rerank picked: score={meta.get('best_score', 0):.3f} "
+              f"breakdown={meta.get('best_breakdown', {})}")
+    else:
+        tl = plan(clips, cfg)
     save_timeline(tl, args.out)
     print(f"wrote {args.out} ({len(tl)} entries)")
 
@@ -75,7 +81,7 @@ def cmd_eval(args: argparse.Namespace) -> None:
 
 def cmd_all(args: argparse.Namespace) -> None:
     from analyze import analyze_pool
-    from planner import load_clips, plan, save_timeline, PlannerConfig
+    from planner import load_clips, plan, plan_n_best, save_timeline, PlannerConfig
     from execute import execute
     from master import master
     out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
@@ -99,7 +105,13 @@ def cmd_all(args: argparse.Namespace) -> None:
         compat_head_ckpt=args.compat_head,
         text_prompt=getattr(args, 'prompt', None),
     )
-    tl = plan(clips, cfg)
+    n_best = getattr(args, 'n_best', 1)
+    if n_best > 1:
+        tl, meta = plan_n_best(clips, cfg, cache_dir=args.cache, n_candidates=n_best)
+        print(f"N-best rerank picked: score={meta.get('best_score', 0):.3f} "
+              f"breakdown={meta.get('best_breakdown', {})}")
+    else:
+        tl = plan(clips, cfg)
     timeline_path = str(out_dir / 'timeline.json')
     save_timeline(tl, timeline_path)
     print(f"  -> {timeline_path}")
@@ -146,6 +158,8 @@ def main() -> None:
                    help='natural-language mix description (e.g. "uplifting trance set")')
     p.add_argument('--compat_head', default=None,
                    help='path to CLAP compat head .pt (Tier 1.5, optional)')
+    p.add_argument('--n_best', type=int, default=1,
+                   help='generate N candidate timelines, rerank by CLAP coherence + vocal-collision penalty, pick best')
     p.set_defaults(func=cmd_plan)
 
     p = sub.add_parser('execute')
@@ -196,6 +210,8 @@ def main() -> None:
                    help='natural-language mix description (e.g. "uplifting trance set")')
     p.add_argument('--compat_head', default=None,
                    help='path to CLAP compat head .pt (Tier 1.5, optional)')
+    p.add_argument('--n_best', type=int, default=1,
+                   help='N-best candidate generation + heuristic rerank')
     p.set_defaults(func=cmd_all)
 
     args = ap.parse_args()

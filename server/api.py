@@ -262,7 +262,12 @@ async def generate(
                 "--cache", str(cache_dir), "--out", str(timeline),
                 "--duration", str(duration), "--arc", final_arc,
                 "--prompt", final_prompt,
-                "--min_unique_clips", str(min(3, max(2, len(saved_paths))))]
+                "--min_unique_clips", str(min(3, max(2, len(saved_paths)))),
+                "--n_best", "5"]
+    # use trained compat head if available
+    compat_head_path = ROOT / "checkpoints" / "clap_compat_head.pt"
+    if compat_head_path.exists():
+        plan_cmd += ["--compat_head", str(compat_head_path)]
     run(plan_cmd, label="plan")
     run([sys.executable, str(main_py), "execute",
          "--timeline", str(timeline), "--cache", str(cache_dir), "--out", str(raw)],

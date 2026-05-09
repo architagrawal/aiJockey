@@ -579,6 +579,174 @@ def save_timeline(timeline: list[dict], path: str) -> None:
         json.dump({'timeline': timeline}, f, indent=2)
 
 
+# ---------------------------------------------------------------------------
+# Path F: N-best generation + heuristic + CLAP rerank
+# ---------------------------------------------------------------------------
+
+def _section_vocal_activity(clip_id: str, section: dict, cache_dir: str | Path) -> float:
+    """Cheap vocal-active probe via cached vocals stem RMS over [start, end].
+
+    Returns vocal_rms / (vocal_rms + inst_rms) in [0, 1].
+    1.0 = pure vocal, 0.0 = pure instrumental. Uses Demucs stems on disk.
+    Cached per (clip, section_idx) at module level.
+    """
+    import soundfile as sf
+    cache = Path(cache_dir)
+    vox_path = cache / 'stems' / clip_id / 'vocals.wav'
+    if not vox_path.exists():
+        return 0.5
+    s, e = float(section.get('start', 0)), float(section.get('end', 0))
+    if e <= s:
+        return 0.5
+    try:
+        info = sf.info(str(vox_path))
+        sr = info.samplerate
+        start_f = max(0, int(s * sr))
+        stop_f = min(info.frames, int(e * sr))
+        vox, _ = sf.read(str(vox_path), start=start_f, stop=stop_f, always_2d=False)
+    except Exception:
+        return 0.5
+    if vox.ndim > 1:
+        vox = vox.mean(axis=-1)
+    vox_rms = float(np.sqrt(np.mean(vox ** 2)) + 1e-8)
+    # estimate inst RMS via drums+bass+other if present
+    inst_rms = 1e-8
+    for stem in ('drums', 'bass', 'other'):
+        sp = cache / 'stems' / clip_id / f'{stem}.wav'
+        if not sp.exists():
+            continue
+        try:
+            arr, _ = sf.read(str(sp), start=start_f, stop=stop_f, always_2d=False)
+            if arr.ndim > 1:
+                arr = arr.mean(axis=-1)
+            inst_rms += float(np.sqrt(np.mean(arr ** 2)))
+        except Exception:
+            pass
+    return vox_rms / (vox_rms + inst_rms)
+
+
+def _timeline_quality(timeline: list[dict], clips: dict[str, dict],
+                      cache_dir: str | Path,
+                      target_duration: float) -> tuple[float, dict]:
+    """Heuristic quality score for a timeline. Higher = better.
+
+    Components (signed):
+      + duration_match — closer to target = better
+      + clap_coherence — avg CLAP cosine between consecutive clips
+      + unique_clip_count — more variety
+      - vocal_collisions — penalty when overlap-style transitions land on
+        sections that are both vocal-active
+      - bpm_strain — penalty for time-stretch >5%
+    """
+    if not timeline:
+        return -1e9, {}
+    total_dur = sum(e['segment']['end'] - e['segment']['start'] for e in timeline)
+    duration_match = max(0.0, 1.0 - abs(total_dur - target_duration) / max(target_duration, 1.0))
+
+    # CLAP coherence
+    clap_pairs = []
+    for a, b in zip(timeline[:-1], timeline[1:]):
+        ca = clips[a['clip_id']].get('clap')
+        cb = clips[b['clip_id']].get('clap')
+        if ca is None or cb is None:
+            continue
+        ca_n = ca / (np.linalg.norm(ca) + 1e-8)
+        cb_n = cb / (np.linalg.norm(cb) + 1e-8)
+        clap_pairs.append(float(ca_n @ cb_n))
+    clap_coherence = float(np.mean(clap_pairs)) if clap_pairs else 0.0
+
+    # Vocal collision penalty: for each transition, check if both sides vocal-active
+    overlap_techs = {'crossfade', 'eq_swap', 'filter_fade', 'echo_out', 'mashup'}
+    vocal_collisions = 0
+    for a, b in zip(timeline[:-1], timeline[1:]):
+        tech = (b.get('transition_in') or {}).get('name', '')
+        if tech not in overlap_techs:
+            continue
+        a_vox = _section_vocal_activity(a['clip_id'], a['segment'], cache_dir)
+        b_vox = _section_vocal_activity(b['clip_id'], b['segment'], cache_dir)
+        if a_vox > 0.25 and b_vox > 0.25:
+            vocal_collisions += 1
+
+    # BPM strain penalty
+    bpm_strain = 0.0
+    for a, b in zip(timeline[:-1], timeline[1:]):
+        ta = clips[a['clip_id']].get('tempo', 0) or 0
+        tb = clips[b['clip_id']].get('tempo', 0) or 0
+        if ta > 0 and tb > 0:
+            diff = abs(tb - ta) / max(ta, tb)
+            bpm_strain += max(0.0, diff - 0.05)
+
+    unique_clips = len({e['clip_id'] for e in timeline})
+
+    score = (
+        2.0 * duration_match
+        + 1.5 * clap_coherence
+        + 0.05 * unique_clips
+        - 1.5 * vocal_collisions
+        - 1.0 * bpm_strain
+    )
+    breakdown = dict(
+        duration_match=duration_match,
+        clap_coherence=clap_coherence,
+        unique_clips=unique_clips,
+        vocal_collisions=vocal_collisions,
+        bpm_strain=bpm_strain,
+        total=score,
+    )
+    return score, breakdown
+
+
+def plan_n_best(clips: dict[str, dict], config: PlannerConfig,
+                cache_dir: str | Path,
+                n_candidates: int = 5,
+                verbose: bool = True) -> tuple[list[dict], dict]:
+    """Generate N candidate timelines by varying planner config; rerank by
+    heuristic quality (CLAP coherence + vocal-collision penalty + duration
+    match). Returns (best_timeline, scoring_metadata).
+    """
+    variants = []
+    base_surprise = config.surprise_budget
+    base_beam = config.beam_width
+    # Variations spanning conservative -> exploratory
+    grid = [
+        dict(surprise_budget=0,                  beam_width=max(1, base_beam // 2)),
+        dict(surprise_budget=base_surprise // 2, beam_width=base_beam),
+        dict(surprise_budget=base_surprise,      beam_width=base_beam),
+        dict(surprise_budget=base_surprise * 2,  beam_width=base_beam),
+        dict(surprise_budget=base_surprise * 3,  beam_width=base_beam * 2),
+    ][:n_candidates]
+    candidates: list[tuple[float, list[dict], dict]] = []
+    for i, override in enumerate(grid):
+        cfg = deepcopy(config)
+        for k, v in override.items():
+            setattr(cfg, k, v)
+        try:
+            tl = plan(clips, cfg)
+        except Exception as e:
+            if verbose:
+                print(f"[N-best #{i}] plan failed: {e}")
+            continue
+        score, br = _timeline_quality(tl, clips, cache_dir, cfg.target_duration)
+        if verbose:
+            print(f"[N-best #{i}] sb={override['surprise_budget']} bw={override['beam_width']} "
+                  f"score={score:.3f} entries={len(tl)} "
+                  f"clap={br.get('clap_coherence',0):.3f} "
+                  f"vox_coll={br.get('vocal_collisions',0)} "
+                  f"bpm_strain={br.get('bpm_strain',0):.3f}")
+        candidates.append((score, tl, br))
+    if not candidates:
+        # Fallback to single planner run
+        tl = plan(clips, config)
+        return tl, {'note': 'no candidates ranked, used base config'}
+    candidates.sort(key=lambda x: -x[0])
+    best_score, best_tl, best_br = candidates[0]
+    return best_tl, {
+        'best_score': best_score,
+        'best_breakdown': best_br,
+        'all_scores': [c[0] for c in candidates],
+    }
+
+
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
