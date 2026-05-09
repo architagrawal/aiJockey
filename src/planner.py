@@ -465,6 +465,14 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
                     continue
                 scored_candidates.append((score, tech, is_surprise, cid, seg, seg_idx))
 
+            # If we ran out of candidates entirely (small pool), the state
+            # cannot extend further. Mark it finished if it meets minimums.
+            if not scored_candidates and not candidate_ids:
+                if (len(st.used_clip_ids) >= config.min_unique_clips
+                        and len(st.sequence) >= config.min_clips):
+                    finished.append(st)
+                continue
+
             # If nothing passed surprise filter, force-add best candidate anyway
             # (better to make progress than die at 1 clip).
             if not scored_candidates and candidate_ids:
@@ -507,13 +515,25 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
         beam = sorted(next_beam, key=lambda s: -s.score)[:config.beam_width]
 
     if not finished:
-        # Fallback: use best partial, even if didn't reach target_duration
-        if beam:
-            finished = sorted(beam, key=lambda s: -s.score)[:1]
-        else:
-            finished = sorted(starts, key=lambda s: -s.score)[:1]
-    # Pick best by total score (not normalized by length — we want long mixes)
-    best = max(finished, key=lambda s: s.score)
+        # Fallback: use best partial. Prefer states that satisfy min_unique_clips,
+        # then highest score. Avoid silently returning a 1-clip state when a
+        # multi-clip partial state was reachable.
+        candidates_pool = list(beam) + list(starts)
+        if candidates_pool:
+            candidates_pool.sort(
+                key=lambda s: (
+                    len(s.used_clip_ids) >= config.min_unique_clips,
+                    len(s.used_clip_ids),
+                    s.score,
+                ),
+                reverse=True,
+            )
+            finished = candidates_pool[:1]
+    # Pick best by score, with a floor on unique-clip count if any state qualifies
+    qualified = [s for s in finished
+                 if len(s.used_clip_ids) >= config.min_unique_clips]
+    pool = qualified or finished
+    best = max(pool, key=lambda s: s.score)
     print(f"plan: {len(best.sequence)} entries, "
           f"{best.cumulative_duration:.1f}s "
           f"(target {config.target_duration:.0f}s), "
