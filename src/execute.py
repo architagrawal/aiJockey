@@ -98,27 +98,59 @@ def render_segment(entry: dict, clips_meta: dict[str, dict],
 # Apply transition between two rendered segments
 # ---------------------------------------------------------------------------
 
+def _suppress_intro_vocals(cur: dict, n_samples: int,
+                           ramp_in_samples: int = 0) -> np.ndarray:
+    """Return a 'full' array where the incoming clip's vocals are silenced
+    for the first n_samples (the overlap window with the outgoing clip),
+    then ramp back to full vocals over ramp_in_samples.
+
+    Prevents two vocal tracks from overlapping during crossfade-style
+    transitions. Drums/bass/other unchanged throughout.
+    """
+    full = cur['full']
+    vox = cur.get('stems', {}).get('vocals')
+    if vox is None or n_samples <= 0:
+        return full
+    n_samples = int(min(n_samples, full.shape[1]))
+    out = full.copy()
+    # zero vocals for the overlap window
+    out[:, :n_samples] -= vox[:, :n_samples]
+    # ramp back: linearly add vocals over ramp_in_samples after overlap
+    if ramp_in_samples > 0:
+        end = min(out.shape[1], n_samples + ramp_in_samples)
+        ramp_n = end - n_samples
+        if ramp_n > 0:
+            ramp = np.linspace(0.0, 1.0, ramp_n, dtype=np.float32)
+            out[:, n_samples:end] -= vox[:, n_samples:end] * (1.0 - ramp)
+    return out
+
+
 def apply_transition(output: np.ndarray, prev: dict, cur: dict,
                      sample_bank: SampleBank, target_bpm: float) -> np.ndarray:
     tech = cur['entry']['transition_in']
     name = tech.get('name', 'crossfade')
     bars = int(tech.get('bars', 16))
     beat_dur = 60.0 / max(target_bpm, 1.0)
+    overlap_n = int(bars * 4 * beat_dur * SR)
+    # Build vocal-suppressed cur for overlap-style transitions
+    cur_no_intro_vox = dict(cur)
+    cur_no_intro_vox['full'] = _suppress_intro_vocals(
+        cur, n_samples=overlap_n, ramp_in_samples=int(beat_dur * SR * 2))
 
     if name in ('cut', 'fade_in'):
         return T.cut_transition(output, cur['full'])
     if name == 'crossfade':
-        return T.crossfade_transition(output, cur['full'], SR, bars, beat_dur)
+        return T.crossfade_transition(output, cur_no_intro_vox['full'], SR, bars, beat_dur)
     if name == 'eq_swap':
         # Embellish: hi-hat roll lead-in to incoming on energy lift
-        out = T.eq_swap_transition(output, cur['full'], SR, bars, beat_dur)
+        out = T.eq_swap_transition(output, cur_no_intro_vox['full'], SR, bars, beat_dur)
         if cur['entry']['segment'].get('energy', 0.5) > 0.7:
             roll = sample_bank.get_fx('hihat_rolls', target_bpm, beats=2.0)
             roll_at = max(0, out.shape[1] - cur['full'].shape[1] - int(2 * beat_dur * SR))
             out = T.overlay_sample(out, roll, roll_at, gain=0.35)
         return out
     if name == 'filter_fade':
-        out = T.filter_fade_transition(output, cur['full'], SR, bars, beat_dur)
+        out = T.filter_fade_transition(output, cur_no_intro_vox['full'], SR, bars, beat_dur)
         # Down-sweep accentuates filter close
         sweep = sample_bank.get_fx('sweeps', target_bpm, beats=float(bars))
         sweep_at = max(0, out.shape[1] - cur['full'].shape[1] - int(bars * 4 * beat_dur * SR))
@@ -168,7 +200,7 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
                                       out_full_remainder=body)
     if name == 'echo_out':
         return T.echo_out_transition(
-            output, cur['full'], SR, bars, beat_dur,
+            output, cur_no_intro_vox['full'], SR, bars, beat_dur,
             delay_beats=float(tech.get('delay_beats', 0.5)),
             feedback=float(tech.get('feedback', 0.55)),
         )
