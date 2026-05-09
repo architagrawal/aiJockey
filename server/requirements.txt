@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+python-multipart
+requests
+demucs
+madmom
+librosa
+soundfile
+pyrubberband
+pyloudnorm
+transformers
+accelerate
+huggingface_hub
+numpy<1.24
+scipy
