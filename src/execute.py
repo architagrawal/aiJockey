@@ -48,12 +48,18 @@ def load_stems(clip_id: str, cache_dir: str = 'cache') -> dict[str, np.ndarray]:
 # ---------------------------------------------------------------------------
 
 def stretch_and_pitch(wav: np.ndarray, sr: int, src_bpm: float,
-                      dst_bpm: float, semitones: float) -> np.ndarray:
+                      dst_bpm: float, semitones: float,
+                      max_bpm_ratio: float | None = None) -> np.ndarray:
     """rubberband expects (T, channels). wav is (channels, T)."""
     x = wav.T.astype(np.float32)
-    if src_bpm > 0 and abs(src_bpm - dst_bpm) > 0.01:
+    dst = float(dst_bpm)
+    if src_bpm > 0 and max_bpm_ratio and max_bpm_ratio > 1.0:
+        lo = src_bpm / max_bpm_ratio
+        hi = src_bpm * max_bpm_ratio
+        dst = max(lo, min(hi, dst))
+    if src_bpm > 0 and abs(src_bpm - dst) > 0.01:
         try:
-            x = pyrb.time_stretch(x, sr, dst_bpm / src_bpm)
+            x = pyrb.time_stretch(x, sr, dst / src_bpm)
         except Exception as e:
             print(f"warn: time_stretch failed ({e}), using original")
     if abs(semitones) > 0.01:
@@ -69,7 +75,8 @@ def stretch_and_pitch(wav: np.ndarray, sr: int, src_bpm: float,
 # ---------------------------------------------------------------------------
 
 def render_segment(entry: dict, clips_meta: dict[str, dict],
-                   cache_dir: str = 'cache') -> tuple[np.ndarray, dict[str, np.ndarray]]:
+                   cache_dir: str = 'cache',
+                   max_bpm_ratio: float | None = None) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     cid = entry['clip_id']
     seg = entry['segment']
     target_bpm = float(entry['target_bpm'])
@@ -85,7 +92,8 @@ def render_segment(entry: dict, clips_meta: dict[str, dict],
     s_start = max(0, int(seg['start'] * SR))
     s_end = int(seg['end'] * SR)
     sliced = {n: s[:, s_start:s_end] for n, s in stems.items()}
-    processed = {n: stretch_and_pitch(s, SR, src_bpm, target_bpm, semitones)
+    processed = {n: stretch_and_pitch(s, SR, src_bpm, target_bpm, semitones,
+                                        max_bpm_ratio=max_bpm_ratio)
                  for n, s in sliced.items()}
     # Equalize lengths (rubberband can produce slightly different sample counts)
     min_len = min(s.shape[1] for s in processed.values())
@@ -125,6 +133,22 @@ def _suppress_intro_vocals(cur: dict, n_samples: int,
     return out
 
 
+def _overlay_accent_hint(out: np.ndarray, cur: dict, sample_bank: SampleBank,
+                         target_bpm: float, beat_dur: float) -> np.ndarray:
+    ah = cur['entry'].get('accent_hint')
+    if not ah:
+        return out
+    cat = ah.get('fx_category', 'hihat_rolls')
+    beats = float(ah.get('beats', 2.0))
+    try:
+        sample = sample_bank.get_fx(str(cat), target_bpm, beats=beats)
+    except Exception:
+        return out
+    # Transition boundary ~ where incoming full starts at tail of outgoing
+    at = max(0, out.shape[1] - cur['full'].shape[1] - int(beats * beat_dur * SR))
+    return T.overlay_sample(out, sample, at, gain=0.35)
+
+
 def apply_transition(output: np.ndarray, prev: dict, cur: dict,
                      sample_bank: SampleBank, target_bpm: float) -> np.ndarray:
     tech = cur['entry']['transition_in']
@@ -137,10 +161,13 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
     cur_no_intro_vox['full'] = _suppress_intro_vocals(
         cur, n_samples=overlap_n, ramp_in_samples=int(beat_dur * SR * 2))
 
+    def _done(o: np.ndarray) -> np.ndarray:
+        return _overlay_accent_hint(o, cur, sample_bank, target_bpm, beat_dur)
+
     if name in ('cut', 'fade_in'):
-        return T.cut_transition(output, cur['full'])
+        return _done(T.cut_transition(output, cur['full']))
     if name == 'crossfade':
-        return T.crossfade_transition(output, cur_no_intro_vox['full'], SR, bars, beat_dur)
+        return _done(T.crossfade_transition(output, cur_no_intro_vox['full'], SR, bars, beat_dur))
     if name == 'eq_swap':
         # Embellish: hi-hat roll lead-in to incoming on energy lift
         out = T.eq_swap_transition(output, cur_no_intro_vox['full'], SR, bars, beat_dur)
@@ -148,13 +175,13 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
             roll = sample_bank.get_fx('hihat_rolls', target_bpm, beats=2.0)
             roll_at = max(0, out.shape[1] - cur['full'].shape[1] - int(2 * beat_dur * SR))
             out = T.overlay_sample(out, roll, roll_at, gain=0.35)
-        return out
+        return _done(out)
     if name == 'filter_fade':
         out = T.filter_fade_transition(output, cur_no_intro_vox['full'], SR, bars, beat_dur)
         # Down-sweep accentuates filter close
         sweep = sample_bank.get_fx('sweeps', target_bpm, beats=float(bars))
         sweep_at = max(0, out.shape[1] - cur['full'].shape[1] - int(bars * 4 * beat_dur * SR))
-        return T.overlay_sample(out, sweep, sweep_at, gain=0.25)
+        return _done(T.overlay_sample(out, sweep, sweep_at, gain=0.25))
     if name == 'silence_drop':
         silence_beats = float(tech.get('silence_beats', 2))
         out = T.silence_drop_transition(output, cur['full'], SR, silence_beats, beat_dur)
@@ -164,11 +191,11 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
         # Sub-drop on the re-entry too
         sub = sample_bank.get_fx('sub_drops', target_bpm, beats=2.0)
         out = T.overlay_sample(out, sub, impact_at, gain=0.5)
-        return out
+        return _done(out)
     if name == 'drum_break':
         drums = prev['stems'].get('drums')
         if drums is None:
-            return T.crossfade_transition(output, cur['full'], SR, bars, beat_dur)
+            return _done(T.crossfade_transition(output, cur['full'], SR, bars, beat_dur))
         drum_seg = drums[:, :prev['full'].shape[1]]
         body_minus_break_n = int(bars * 4 * beat_dur * SR)
         body = output[:, :-body_minus_break_n] if output.shape[1] > body_minus_break_n else np.zeros((2, 0), dtype=np.float32)
@@ -177,44 +204,44 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
         # Snare roll lead-in to incoming
         roll = sample_bank.get_fx('snare_rolls', target_bpm, beats=4.0)
         roll_at = max(0, out.shape[1] - cur['full'].shape[1] - int(4 * beat_dur * SR))
-        return T.overlay_sample(out, roll, roll_at, gain=0.4)
+        return _done(T.overlay_sample(out, roll, roll_at, gain=0.4))
     if name == 'mashup':
         inst = sum(v for k, v in prev['stems'].items() if k != 'vocals')
         in_vox = cur['stems'].get('vocals')
         if in_vox is None or not hasattr(inst, 'shape'):
-            return T.crossfade_transition(output, cur['full'], SR, bars, beat_dur)
+            return _done(T.crossfade_transition(output, cur['full'], SR, bars, beat_dur))
         n_overlay = int(bars * 4 * beat_dur * SR)
         body = output[:, :-n_overlay] if output.shape[1] > n_overlay else np.zeros((2, 0), dtype=np.float32)
         inst_tail = inst[:, -n_overlay:] if inst.shape[1] >= n_overlay else inst
-        return T.mashup_transition(inst_tail, in_vox, cur['full'], SR, bars, beat_dur,
-                                   out_full_remainder=body)
+        return _done(T.mashup_transition(inst_tail, in_vox, cur['full'], SR, bars, beat_dur,
+                                         out_full_remainder=body))
     if name == 'stem_swap':
         inst = sum(v for k, v in prev['stems'].items() if k != 'vocals')
         in_vox = cur['stems'].get('vocals')
         if in_vox is None:
-            return T.crossfade_transition(output, cur['full'], SR, bars, beat_dur)
+            return _done(T.crossfade_transition(output, cur['full'], SR, bars, beat_dur))
         n_overlay = int(bars * 4 * beat_dur * SR)
         body = output[:, :-n_overlay] if output.shape[1] > n_overlay else np.zeros((2, 0), dtype=np.float32)
         inst_tail = inst[:, -n_overlay:] if inst.shape[1] >= n_overlay else inst
-        return T.stem_swap_transition(inst_tail, in_vox, cur['full'], SR, bars, beat_dur,
-                                      out_full_remainder=body)
+        return _done(T.stem_swap_transition(inst_tail, in_vox, cur['full'], SR, bars, beat_dur,
+                                            out_full_remainder=body))
     if name == 'echo_out':
-        return T.echo_out_transition(
+        return _done(T.echo_out_transition(
             output, cur_no_intro_vox['full'], SR, bars, beat_dur,
             delay_beats=float(tech.get('delay_beats', 0.5)),
             feedback=float(tech.get('feedback', 0.55)),
-        )
+        ))
     if name == 'spinback':
         sb_beats = float(tech.get('spinback_beats', 4))
         out = T.spinback_transition(output, cur['full'], SR, sb_beats, beat_dur)
         vinyl = sample_bank.get_fx('vinyl', target_bpm, beats=sb_beats)
         fx_at = max(0, out.shape[1] - cur['full'].shape[1] - int(sb_beats * beat_dur * SR))
-        return T.overlay_sample(out, vinyl, fx_at, gain=0.5)
+        return _done(T.overlay_sample(out, vinyl, fx_at, gain=0.5))
     if name == 'pitch_bend':
-        return T.pitch_bend_transition(
+        return _done(T.pitch_bend_transition(
             output, cur['full'], SR, bars, beat_dur,
             semitones=float(tech.get('semitones', 1.0)),
-        )
+        ))
     if name == 'loop_tighten':
         out = T.loop_tighten_transition(
             output, cur['full'], SR, beat_dur,
@@ -231,16 +258,16 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
             horn = sample_bank.get_fx('airhorns', target_bpm, beats=1.0)
             horn_at = out.shape[1] - cur['full'].shape[1]
             out = T.overlay_sample(out, horn, horn_at, gain=0.3)
-        return out
+        return _done(out)
     if name == 'scratch_fill':
         hook_seg = prev['full'][:, -int(2 * beat_dur * SR):]
         scratch = T.scratch_fill(hook_seg, SR, beat_dur, n_jogs=int(tech.get('n_jogs', 4)))
-        return np.concatenate([output, scratch, cur['full']], axis=1)
+        return _done(np.concatenate([output, scratch, cur['full']], axis=1))
     if name == 'loop_callback':
         reps = int(tech.get('repetitions', 2))
         looped = T.loop_callback(cur['full'], reps)
-        return T.cut_transition(output, looped)
-    return T.crossfade_transition(output, cur['full'], SR, bars, beat_dur)
+        return _done(T.cut_transition(output, looped))
+    return _done(T.crossfade_transition(output, cur['full'], SR, bars, beat_dur))
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +277,11 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
 def execute(timeline_path: str, cache_dir: str, out_path: str,
             samples_dir: str = 'samples') -> np.ndarray:
     with open(timeline_path) as f:
-        tl = json.load(f)['timeline']
+        blob = json.load(f)
+    tl = blob['timeline']
+    meta = blob.get('meta') or {}
+    max_ratio = meta.get('max_stretch_ratio')
+    max_bpm_ratio = float(max_ratio) if max_ratio is not None else None
     if not tl:
         raise SystemExit("empty timeline")
 
@@ -271,7 +302,8 @@ def execute(timeline_path: str, cache_dir: str, out_path: str,
     rendered = []
     for i, entry in enumerate(tl):
         print(f"rendering {i+1}/{len(tl)}: {entry['clip_id']} [{entry['segment']['type']}]")
-        full, stems = render_segment(entry, clips_meta, cache_dir)
+        full, stems = render_segment(entry, clips_meta, cache_dir,
+                                     max_bpm_ratio=max_bpm_ratio)
         rendered.append({'entry': entry, 'full': full, 'stems': stems})
 
     output = rendered[0]['full']

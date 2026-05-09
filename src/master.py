@@ -100,6 +100,16 @@ def master(in_path: str, out_path: str, target_lufs: float = -9.0) -> None:
     elif x.shape[0] > 2:
         x = x[:2]
 
+    # Hot / brickwalled uploads: reduce inter-sample stress before multiband squash
+    peak = float(np.abs(x).max())
+    if peak > 0.95:
+        x = x * float(0.92 / max(peak, 1e-6))
+    meter_early = pyln.Meter(sr)
+    loud_early = meter_early.integrated_loudness(x.T)
+    eff_target = float(target_lufs)
+    if np.isfinite(loud_early) and loud_early > -10.0:
+        eff_target = float(max(target_lufs, loud_early - 2.0))
+
     x = hp(x, sr, 30)
 
     low, mid, high = split_bands(x, sr)
@@ -108,8 +118,11 @@ def master(in_path: str, out_path: str, target_lufs: float = -9.0) -> None:
     high = compress(high, threshold_db=-22, ratio=2.0, sr=sr)
     x = (low + mid + high).astype(np.float32)
 
-    x = compress(x, threshold_db=-12, ratio=2.0, sr=sr).astype(np.float32)
-    x = lufs_normalize(x, sr, target_lufs).astype(np.float32)
+    if np.isfinite(loud_early) and loud_early > -11.0:
+        x = compress(x, threshold_db=-8, ratio=1.8, sr=sr).astype(np.float32)
+    else:
+        x = compress(x, threshold_db=-12, ratio=2.0, sr=sr).astype(np.float32)
+    x = lufs_normalize(x, sr, eff_target).astype(np.float32)
     x = limit(x, ceiling_db=-1.0, sr=sr).astype(np.float32)
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)

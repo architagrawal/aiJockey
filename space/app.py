@@ -33,6 +33,8 @@ LUFS_OPTIONS = {"streaming (-14)": -14, "club (-9)": -9, "competition (-6)": -6}
 MIN_CLIPS, MAX_CLIPS = 2, 8
 MIN_DURATION = 30
 MAX_DURATION_HARD = 600
+BACKEND_TIMEOUT_SEC = 1200  # align with API AIJOCKEY_JOB_TIMEOUT_SEC default
+EXPORT_FORMATS = {"MP3 (default)": "mp3", "WAV (lossless)": "wav", "FLAC (lossless)": "flac"}
 
 
 def check_pw(pw: str):
@@ -76,7 +78,8 @@ def update_duration_bounds(files, use_library):
 
 
 def call_backend(files, preset_label, duration, use_library,
-                 advanced_on, custom_prompt, custom_arc, seed, lufs_label):
+                 advanced_on, custom_prompt, custom_arc, seed, lufs_label,
+                 export_label):
     if not MI300X_URL or not MI300X_KEY:
         return None, "Backend not configured. Set MI300X_URL + MI300X_KEY in Space secrets."
     if not files:
@@ -95,6 +98,7 @@ def call_backend(files, preset_label, duration, use_library,
         "duration": str(int(duration)),
         "use_library": "true" if use_library else "false",
         "lufs": str(LUFS_OPTIONS.get(lufs_label, -9)),
+        "export_format": EXPORT_FORMATS.get(export_label, "mp3"),
     }
     if advanced_on:
         if custom_prompt and custom_prompt.strip():
@@ -108,17 +112,33 @@ def call_backend(files, preset_label, duration, use_library,
                 pass
 
     headers = {"X-Key": MI300X_KEY}
+    suf = {"mp3": ".mp3", "wav": ".wav", "flac": ".flac"}.get(
+        EXPORT_FORMATS.get(export_label, "mp3"), ".mp3")
     try:
-        r = requests.post(f"{MI300X_URL}/generate",
-                          data=data, files=multipart, headers=headers, timeout=900)
+        r = requests.post(
+            f"{MI300X_URL}/generate",
+            data=data, files=multipart, headers=headers, timeout=BACKEND_TIMEOUT_SEC)
     except requests.exceptions.RequestException as e:
-        return None, f"Backend unreachable: {e}. Droplet may be destroyed (idle)."
+        return None, f"Backend unreachable: {e}. Check tunnel / AMD instance."
+    if r.status_code == 503:
+        return None, "Server busy (one mix at a time on GPU). Retry in ~2 min. " + r.text[:300]
+    if r.status_code == 504:
+        return None, f"Job exceeded ~{BACKEND_TIMEOUT_SEC // 60} min. Try shorter mix or fewer clips."
     if r.status_code != 200:
         return None, f"Error {r.status_code}: {r.text[:400]}"
 
-    out = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-    out.write(r.content); out.close()
-    return out.name, f"OK · preset={preset_label} · duration={int(duration)}s · library={use_library}"
+    job_ref = r.headers.get("X-Job-Id", "")
+    warn = r.headers.get("X-Ingest-Warnings")
+    out = tempfile.NamedTemporaryFile(suffix=suf, delete=False)
+    out.write(r.content)
+    out.close()
+    extra = f" job_id={job_ref}" if job_ref else ""
+    if warn:
+        extra += f"\n\nIngest note: {warn}"
+    return (
+        out.name,
+        f"OK · preset={preset_label} · duration={int(duration)}s · export={EXPORT_FORMATS.get(export_label, 'mp3')}{extra}",
+    )
 
 
 def health_check():
@@ -158,7 +178,10 @@ with gr.Blocks(title="AiJockey", theme=gr.themes.Soft()) as app:
             unlock = gr.Button("Unlock")
             err = gr.Markdown()
         with gr.Group(visible=False) as panel:
-            gr.Markdown(f"Upload {MIN_CLIPS}-{MAX_CLIPS} audio clips (mp3/wav/flac/m4a/ogg, ≤25 MB each).")
+            gr.Markdown(
+                f"Upload **{MIN_CLIPS}–{MAX_CLIPS}** audio clips (wav/mp3/flac/m4a/ogg, **≤25 MB** each). "
+                f"Target mix **≤{MAX_DURATION_HARD // 60} min** wall clock; backend may return **503** if busy (one GPU job) or **504** if generation exceeds **~{BACKEND_TIMEOUT_SEC // 60} min**."
+            )
             files = gr.File(file_count="multiple", file_types=["audio"],
                             label=f"Your clips ({MIN_CLIPS}-{MAX_CLIPS})")
 
@@ -167,6 +190,8 @@ with gr.Blocks(title="AiJockey", theme=gr.themes.Soft()) as app:
                                      label="Vibe preset")
                 lufs = gr.Dropdown(list(LUFS_OPTIONS), value="club (-9)",
                                    label="Loudness target")
+                export_fmt = gr.Dropdown(
+                    list(EXPORT_FORMATS), value="MP3 (default)", label="Download format")
 
             duration = gr.Slider(minimum=MIN_DURATION, maximum=MIN_DURATION,
                                  value=MIN_DURATION, step=5,
@@ -197,7 +222,7 @@ with gr.Blocks(title="AiJockey", theme=gr.themes.Soft()) as app:
 
             generate.click(call_backend,
                            [files, preset, duration, use_library,
-                            advanced_on, custom_prompt, custom_arc, seed, lufs],
+                            advanced_on, custom_prompt, custom_arc, seed, lufs, export_fmt],
                            [out_audio, status])
 
         unlock.click(check_pw, pw, [panel, gate, err])
