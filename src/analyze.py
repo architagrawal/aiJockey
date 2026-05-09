@@ -54,12 +54,17 @@ class Analyzer:
         from clap_wrapper import CLAP_Module
         self.clap = CLAP_Module(enable_fusion=False)
         self.clap.load_ckpt()
-        import madmom
-        self.beat_proc = madmom.features.beats.RNNBeatProcessor()
-        self.beat_track = madmom.features.beats.BeatTrackingProcessor(fps=100)
-        self.dbn_proc = madmom.features.downbeats.RNNDownBeatProcessor()
-        self.dbn_track = madmom.features.downbeats.DBNDownBeatTrackingProcessor(
-            beats_per_bar=[3, 4], fps=100)
+        self.use_madmom = False
+        try:
+            import madmom
+            self.beat_proc = madmom.features.beats.RNNBeatProcessor()
+            self.beat_track = madmom.features.beats.BeatTrackingProcessor(fps=100)
+            self.dbn_proc = madmom.features.downbeats.RNNDownBeatProcessor()
+            self.dbn_track = madmom.features.downbeats.DBNDownBeatTrackingProcessor(
+                beats_per_bar=[3, 4], fps=100)
+            self.use_madmom = True
+        except Exception as e:
+            print(f"[analyze] madmom unavailable ({e.__class__.__name__}); using librosa beat fallback")
 
     def load(self, path: str) -> torch.Tensor:
         wav, sr = torchaudio.load(path)
@@ -80,11 +85,17 @@ class Analyzer:
 
     def beats_and_downbeats(self, wav: torch.Tensor) -> tuple[float, list[float], list[float]]:
         mono = wav.mean(0).numpy().astype(np.float32)
-        beat_act = self.beat_proc(mono)
-        beats = [float(t) for t in self.beat_track(beat_act)]
-        db_act = self.dbn_proc(mono)
-        db_out = self.dbn_track(db_act)
-        downbeats = [float(t) for t, b in db_out if int(b) == 1]
+        if self.use_madmom:
+            beat_act = self.beat_proc(mono)
+            beats = [float(t) for t in self.beat_track(beat_act)]
+            db_act = self.dbn_proc(mono)
+            db_out = self.dbn_track(db_act)
+            downbeats = [float(t) for t, b in db_out if int(b) == 1]
+        else:
+            tempo_lr, beat_frames = librosa.beat.beat_track(y=mono, sr=SR, units='time')
+            beats = [float(t) for t in beat_frames]
+            # downbeat heuristic: every 4th beat (assume 4/4)
+            downbeats = beats[::4]
         if len(beats) > 1:
             ibis = np.diff(beats)
             tempo = 60.0 / float(np.median(ibis))
