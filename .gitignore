@@ -57,6 +57,7 @@ NGROK_DOMAIN.txt
 SSH_KEY_PATH.TXT
 SSH_KEY_PATH.txt
 HF_TOKEN.txt
+DROPLET.txt
 
 # secrets / keys / tokens — broad catch-all
 *.pem

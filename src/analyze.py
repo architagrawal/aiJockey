@@ -204,9 +204,29 @@ class Analyzer:
         ), clap, energy
 
 
+def _analyze_one(args: tuple) -> str:
+    """Worker function: analyze a single clip. Loads Analyzer per-process."""
+    clip_path, cache_dir, device, worker_id = args
+    cache_path = Path(cache_dir)
+    p = Path(clip_path)
+    clip_id = p.stem
+    json_path = cache_path / f'{clip_id}.json'
+    npz_path = cache_path / f'{clip_id}.npz'
+    if json_path.exists() and npz_path.exists():
+        return f"[w{worker_id}] skip {clip_id} (cached)"
+    # Lazy-init per-process analyzer (model load ~5s)
+    global _WORKER_ANALYZER
+    if '_WORKER_ANALYZER' not in globals() or _WORKER_ANALYZER is None:
+        _WORKER_ANALYZER = Analyzer(device=device)
+    result, clap, energy = _WORKER_ANALYZER.analyze(str(p), clip_id, cache_path)
+    np.savez_compressed(str(npz_path), clap=clap, energy=energy)
+    with open(json_path, 'w') as f:
+        json.dump(asdict(result), f, indent=2)
+    return f"[w{worker_id}] saved {clip_id}"
+
+
 def analyze_pool(clip_dir: str, cache_dir: str, device: str = 'cuda',
-                 force: bool = False) -> None:
-    analyzer = Analyzer(device=device)
+                 force: bool = False, workers: int = 1) -> None:
     cache_path = Path(cache_dir)
     cache_path.mkdir(parents=True, exist_ok=True)
     audio_exts = ('*.wav', '*.mp3', '*.flac', '*.m4a', '*.ogg')
@@ -216,19 +236,41 @@ def analyze_pool(clip_dir: str, cache_dir: str, device: str = 'cuda',
     if not paths:
         print(f"no audio in {clip_dir}")
         return
+
+    # filter cached if not forcing
+    pending: list[Path] = []
     for p in paths:
-        clip_id = p.stem
-        json_path = cache_path / f'{clip_id}.json'
-        npz_path = cache_path / f'{clip_id}.npz'
-        if not force and json_path.exists() and npz_path.exists():
-            print(f"skip {clip_id} (cached)")
+        cid = p.stem
+        if not force and (cache_path / f'{cid}.json').exists() and (cache_path / f'{cid}.npz').exists():
+            print(f"skip {cid} (cached)")
             continue
-        print(f"analyzing {clip_id}")
-        result, clap, energy = analyzer.analyze(str(p), clip_id, cache_path)
-        np.savez_compressed(str(npz_path), clap=clap, energy=energy)
-        with open(json_path, 'w') as f:
-            json.dump(asdict(result), f, indent=2)
-        print(f"  saved {json_path.name} + {npz_path.name}")
+        pending.append(p)
+    if not pending:
+        print("nothing to analyze")
+        return
+
+    if workers <= 1:
+        # sequential path (single Analyzer reused)
+        analyzer = Analyzer(device=device)
+        for p in pending:
+            cid = p.stem
+            print(f"analyzing {cid}")
+            result, clap, energy = analyzer.analyze(str(p), cid, cache_path)
+            np.savez_compressed(str(cache_path / f'{cid}.npz'), clap=clap, energy=energy)
+            with open(cache_path / f'{cid}.json', 'w') as f:
+                json.dump(asdict(result), f, indent=2)
+            print(f"  saved {cid}")
+        return
+
+    # parallel path
+    import multiprocessing as mp
+    ctx = mp.get_context('spawn')  # safe with CUDA/ROCm
+    n = min(workers, len(pending))
+    print(f"parallel analyze: {len(pending)} clips, {n} workers")
+    args_list = [(str(p), str(cache_path), device, i % n) for i, p in enumerate(pending)]
+    with ctx.Pool(processes=n) as pool:
+        for msg in pool.imap_unordered(_analyze_one, args_list):
+            print(msg)
 
 
 if __name__ == '__main__':

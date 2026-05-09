@@ -27,7 +27,8 @@ import argparse
 
 def cmd_analyze(args: argparse.Namespace) -> None:
     from analyze import analyze_pool
-    analyze_pool(args.clips, args.cache, args.device, args.force)
+    analyze_pool(args.clips, args.cache, args.device, args.force,
+                 workers=getattr(args, 'workers', 1))
 
 
 def cmd_plan(args: argparse.Namespace) -> None:
@@ -79,7 +80,8 @@ def cmd_all(args: argparse.Namespace) -> None:
     from master import master
     out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     print("[1/4] analyze")
-    analyze_pool(args.clips, args.cache, args.device, args.force)
+    analyze_pool(args.clips, args.cache, args.device, args.force,
+                 workers=getattr(args, 'workers', 1))
     print("[2/4] plan")
     clips = load_clips(args.cache)
     if not clips:
@@ -119,6 +121,8 @@ def main() -> None:
     p.add_argument('--cache', default='cache')
     p.add_argument('--device', default='cuda')
     p.add_argument('--force', action='store_true')
+    p.add_argument('--workers', type=int, default=1,
+                   help='parallel workers; >=2 spawns process pool. Each loads its own model. Tune for VRAM.')
     p.set_defaults(func=cmd_analyze)
 
     p = sub.add_parser('plan')
@@ -171,6 +175,8 @@ def main() -> None:
     p.add_argument('--samples', default='samples')
     p.add_argument('--device', default='cuda')
     p.add_argument('--force', action='store_true')
+    p.add_argument('--workers', type=int, default=1,
+                   help='parallel analyze workers')
     p.add_argument('--duration', type=float, default=1800.0)
     p.add_argument('--surprises', type=int, default=10)
     p.add_argument('--callbacks', type=int, default=1)
