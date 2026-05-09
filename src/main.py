@@ -32,22 +32,48 @@ def cmd_analyze(args: argparse.Namespace) -> None:
 
 
 def cmd_plan(args: argparse.Namespace) -> None:
-    from planner import load_clips, plan, plan_n_best, save_timeline, PlannerConfig
+    from planner import (
+        load_clips, plan, plan_n_best, save_timeline, PlannerConfig,
+        compute_pool_coherence, apply_llm_transition_tiers_to_timeline,
+        attach_accent_hints,
+    )
     clips = load_clips(args.cache)
     if not clips:
         print(f"no analyzed clips in {args.cache}. Run 'analyze' first.")
         sys.exit(1)
+
+    director_out: dict | None = None
+    if getattr(args, 'use_director', False):
+        from director import run_director
+        director_out = run_director(
+            user_prompt=getattr(args, 'prompt', None) or '',
+            arc_preset=getattr(args, 'arc', 'build'),
+            clip_count_estimate=len(clips),
+            approx_duration_seconds=float(args.duration),
+        )
+        print(f"[director] arc={director_out.get('arc')} "
+              f"prompt='{(director_out.get('text_prompt') or '')[:60]}' "
+              f"tiers={len(director_out.get('transition_tiers') or [])}")
+
+    arc_final = (director_out or {}).get('arc') or getattr(args, 'arc', 'build')
+    prompt_final = (director_out or {}).get('text_prompt') or getattr(args, 'prompt', None)
+    surprise_final = int((director_out or {}).get('surprise_budget', args.surprises))
+    callback_final = int((director_out or {}).get('callback_budget', args.callbacks))
+    same_genre = bool((director_out or {}).get('same_genre_tight_mix'))
+
     cfg = PlannerConfig(
         target_duration=args.duration,
-        surprise_budget=args.surprises,
-        callback_budget=args.callbacks,
+        surprise_budget=surprise_final,
+        callback_budget=callback_final,
         max_clips=args.max_clips,
         min_unique_clips=getattr(args, 'min_unique_clips', 5),
-        arc_shape=getattr(args, 'arc', 'build'),
+        arc_shape=arc_final,
         style_rag_dir=args.style_rag,
         classifier_ckpt=args.classifier,
         compat_head_ckpt=args.compat_head,
-        text_prompt=getattr(args, 'prompt', None),
+        text_prompt=prompt_final,
+        pool_coherence=compute_pool_coherence(clips),
+        same_genre_tight_mix=same_genre,
     )
     n_best = getattr(args, 'n_best', 1)
     if n_best > 1:
@@ -56,6 +82,15 @@ def cmd_plan(args: argparse.Namespace) -> None:
               f"breakdown={meta.get('best_breakdown', {})}")
     else:
         tl = plan(clips, cfg)
+    if director_out is not None and getattr(args, 'apply_llm_tiers', False):
+        tiers = director_out.get('transition_tiers') or []
+        accents = director_out.get('accent_hints') or []
+        if tiers:
+            apply_llm_transition_tiers_to_timeline(tl, tiers)
+            print(f"[director] applied {len(tiers)} LLM tier transitions")
+        if accents:
+            attach_accent_hints(tl, accents)
+            print(f"[director] attached {len(accents)} accent hints")
     save_timeline(tl, args.out)
     print(f"wrote {args.out} ({len(tl)} entries)")
 
@@ -80,8 +115,13 @@ def cmd_eval(args: argparse.Namespace) -> None:
 
 
 def cmd_all(args: argparse.Namespace) -> None:
+    import os as _os
     from analyze import analyze_pool
-    from planner import load_clips, plan, plan_n_best, save_timeline, PlannerConfig
+    from planner import (
+        load_clips, plan, plan_n_best, save_timeline, PlannerConfig,
+        compute_pool_coherence, apply_llm_transition_tiers_to_timeline,
+        attach_accent_hints,
+    )
     from execute import execute
     from master import master
     out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
@@ -93,17 +133,40 @@ def cmd_all(args: argparse.Namespace) -> None:
     if not clips:
         print("no analyzed clips after analyze. Aborting.")
         sys.exit(1)
+
+    # Director LLM (optional) — produces sanitized plan dict overriding prompt/arc/budgets
+    director_out: dict | None = None
+    if getattr(args, 'use_director', False):
+        from director import run_director
+        director_out = run_director(
+            user_prompt=getattr(args, 'prompt', None) or '',
+            arc_preset=getattr(args, 'arc', 'build'),
+            clip_count_estimate=len(clips),
+            approx_duration_seconds=float(args.duration),
+        )
+        print(f"[director] arc={director_out.get('arc')} "
+              f"prompt='{(director_out.get('text_prompt') or '')[:60]}' "
+              f"tiers={len(director_out.get('transition_tiers') or [])}")
+
+    arc_final = (director_out or {}).get('arc') or getattr(args, 'arc', 'build')
+    prompt_final = (director_out or {}).get('text_prompt') or getattr(args, 'prompt', None)
+    surprise_final = int((director_out or {}).get('surprise_budget', args.surprises))
+    callback_final = int((director_out or {}).get('callback_budget', args.callbacks))
+    same_genre = bool((director_out or {}).get('same_genre_tight_mix'))
+
     cfg = PlannerConfig(
         target_duration=args.duration,
-        surprise_budget=args.surprises,
-        callback_budget=args.callbacks,
+        surprise_budget=surprise_final,
+        callback_budget=callback_final,
         max_clips=args.max_clips,
         min_unique_clips=getattr(args, 'min_unique_clips', 5),
-        arc_shape=getattr(args, 'arc', 'build'),
+        arc_shape=arc_final,
         style_rag_dir=args.style_rag,
         classifier_ckpt=args.classifier,
         compat_head_ckpt=args.compat_head,
-        text_prompt=getattr(args, 'prompt', None),
+        text_prompt=prompt_final,
+        pool_coherence=compute_pool_coherence(clips),
+        same_genre_tight_mix=same_genre,
     )
     n_best = getattr(args, 'n_best', 1)
     if n_best > 1:
@@ -112,6 +175,17 @@ def cmd_all(args: argparse.Namespace) -> None:
               f"breakdown={meta.get('best_breakdown', {})}")
     else:
         tl = plan(clips, cfg)
+
+    # Apply Director-suggested transition tiers + accent hints if requested
+    if director_out is not None and getattr(args, 'apply_llm_tiers', False):
+        tiers = director_out.get('transition_tiers') or []
+        accents = director_out.get('accent_hints') or []
+        if tiers:
+            apply_llm_transition_tiers_to_timeline(tl, tiers)
+            print(f"[director] applied {len(tiers)} LLM tier transitions")
+        if accents:
+            attach_accent_hints(tl, accents)
+            print(f"[director] attached {len(accents)} accent hints")
     timeline_path = str(out_dir / 'timeline.json')
     save_timeline(tl, timeline_path)
     print(f"  -> {timeline_path}")
@@ -160,6 +234,10 @@ def main() -> None:
                    help='path to CLAP compat head .pt (Tier 1.5, optional)')
     p.add_argument('--n_best', type=int, default=1,
                    help='generate N candidate timelines, rerank by CLAP coherence + vocal-collision penalty, pick best')
+    p.add_argument('--use_director', action='store_true',
+                   help='use HF Director LLM to refine prompt/arc/budgets/tiers')
+    p.add_argument('--apply_llm_tiers', action='store_true',
+                   help='replace planner-chosen transitions with LLM tier-mapped tasteful techniques')
     p.set_defaults(func=cmd_plan)
 
     p = sub.add_parser('execute')
@@ -212,6 +290,10 @@ def main() -> None:
                    help='path to CLAP compat head .pt (Tier 1.5, optional)')
     p.add_argument('--n_best', type=int, default=1,
                    help='N-best candidate generation + heuristic rerank')
+    p.add_argument('--use_director', action='store_true',
+                   help='use HF Director LLM to refine prompt/arc/budgets/tiers (env: AIJOCKEY_USE_DIRECTOR_LLM=0 forces deterministic fallback)')
+    p.add_argument('--apply_llm_tiers', action='store_true',
+                   help='replace planner-chosen transitions with LLM tier-mapped tasteful techniques (requires --use_director)')
     p.set_defaults(func=cmd_all)
 
     args = ap.parse_args()
