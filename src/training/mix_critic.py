@@ -70,8 +70,69 @@ def load_audio(path: Path) -> tuple[np.ndarray, int]:
 # Build dataset
 # ---------------------------------------------------------------------------
 
+def _positives_one_set(args: tuple) -> list[np.ndarray]:
+    """Worker: load 1 DJ set, sample N random 8s windows, return list of mels.
+    Each worker handles 1 set to avoid loading huge audio in main process.
+    """
+    set_path, n_samples, seed = args
+    rnd = random.Random(seed)
+    out: list[np.ndarray] = []
+    try:
+        audio, sr = load_audio(Path(set_path))
+    except Exception as e:
+        print(f"  skip {set_path}: {e}", flush=True)
+        return out
+    if audio.ndim > 1:
+        audio = audio.mean(axis=0) if audio.shape[0] in (1, 2) else audio.mean(axis=-1)
+    if sr != SR:
+        import librosa
+        audio = librosa.resample(audio.astype(np.float32), orig_sr=sr, target_sr=SR)
+        sr = SR
+    target = int(WIN_SECONDS * sr)
+    if audio.shape[0] < target:
+        return out
+    for _ in range(n_samples):
+        s = rnd.randint(0, audio.shape[0] - target)
+        out.append(to_mel(audio[s:s + target], sr))
+    print(f"  + {Path(set_path).name}: {len(out)} windows", flush=True)
+    return out
+
+
+def _negative_splice_one(args: tuple) -> np.ndarray | None:
+    """Worker: random splice of two clips. Each call loads only what it needs.
+
+    Reuses a small process-local audio cache for the most-recent clip to avoid
+    reloading the same file 100x.
+    """
+    clip_paths, seed = args
+    rnd = random.Random(seed)
+    half = WIN_SAMPLES // 2
+    a, b = rnd.sample(clip_paths, 2)
+    try:
+        wa, sra = load_audio(Path(a))
+        wb, srb = load_audio(Path(b))
+    except Exception:
+        return None
+    import librosa
+    def _to_mono_sr(w, sr):
+        if w.ndim > 1:
+            w = w.mean(axis=0) if w.shape[0] in (1, 2) else w.mean(axis=-1)
+        if sr != SR:
+            w = librosa.resample(w.astype(np.float32), orig_sr=sr, target_sr=SR)
+        return w
+    wa = _to_mono_sr(wa, sra)
+    wb = _to_mono_sr(wb, srb)
+    if wa.shape[0] < half or wb.shape[0] < half:
+        return None
+    sa = rnd.randint(0, wa.shape[0] - half)
+    sb = rnd.randint(0, wb.shape[0] - half)
+    spliced = np.concatenate([wa[sa:sa + half], wb[sb:sb + half]])
+    return to_mel(spliced, SR)
+
+
 def build_data(sets_dir: Path, clips_dir: Path, out_path: Path,
-               n_pos: int = 1000, n_neg: int = 1000) -> None:
+               n_pos: int = 1000, n_neg: int = 1000,
+               workers: int = 0) -> None:
     set_paths = sorted(list(sets_dir.glob("*.mp3")) + list(sets_dir.glob("*.wav")))
     clip_paths = sorted(list(clips_dir.glob("*.wav")) + list(clips_dir.glob("*.mp3")))
     if len(set_paths) < 2:
@@ -79,63 +140,44 @@ def build_data(sets_dir: Path, clips_dir: Path, out_path: Path,
     if len(clip_paths) < 4:
         raise SystemExit(f"need >=4 clips in {clips_dir}, got {len(clip_paths)}")
 
-    print(f"sets: {len(set_paths)}, clips: {len(clip_paths)}")
+    if workers <= 0:
+        import os as _os
+        workers = max(2, min(8, (_os.cpu_count() or 4) - 1))
+    print(f"sets: {len(set_paths)}, clips: {len(clip_paths)}, workers: {workers}")
 
-    X: list[np.ndarray] = []
-    y: list[int] = []
+    import multiprocessing as mp
+    ctx = mp.get_context("spawn")
 
-    # Positives: random 8s windows from real DJ sets
-    print(f"sampling {n_pos} positive windows...")
+    # Positives: parallel — each worker handles 1 set, samples N windows.
     samples_per_set = max(1, n_pos // len(set_paths))
-    for sp in set_paths:
-        try:
-            audio, sr = load_audio(sp)
-        except Exception as e:
-            print(f"  skip {sp.name}: {e}")
-            continue
-        for _ in range(samples_per_set):
-            w = random_window(audio, sr)
-            if w is None:
+    pos_args = [(str(sp), samples_per_set, i) for i, sp in enumerate(set_paths)]
+    print(f"positives: {samples_per_set} windows/set across {len(set_paths)} sets...")
+    X_pos: list[np.ndarray] = []
+    with ctx.Pool(processes=min(workers, len(set_paths))) as pool:
+        for batch in pool.imap_unordered(_positives_one_set, pos_args):
+            X_pos.extend(batch)
+            if len(X_pos) >= n_pos:
+                pool.terminate()
                 break
-            X.append(to_mel(w, sr))
-            y.append(1)
-        del audio
-        if len(y) >= n_pos:
-            break
+    X_pos = X_pos[:n_pos]
 
-    # Negatives: random splice of two clips, no transition
-    print(f"sampling {n_neg} negative splices...")
-    half = WIN_SAMPLES // 2
-    while sum(yi == 0 for yi in y) < n_neg:
-        a, b = random.sample(clip_paths, 2)
-        try:
-            wa, sra = load_audio(a)
-            wb, srb = load_audio(b)
-        except Exception:
-            continue
-        if sra != SR:
-            import librosa
-            wa = librosa.resample(wa.astype(np.float32) if wa.ndim == 1 else wa.mean(0).astype(np.float32),
-                                  orig_sr=sra, target_sr=SR)
-        elif wa.ndim > 1:
-            wa = wa.mean(axis=0)
-        if srb != SR:
-            import librosa
-            wb = librosa.resample(wb.astype(np.float32) if wb.ndim == 1 else wb.mean(0).astype(np.float32),
-                                  orig_sr=srb, target_sr=SR)
-        elif wb.ndim > 1:
-            wb = wb.mean(axis=0)
-        if wa.shape[0] < half or wb.shape[0] < half:
-            continue
-        sa = random.randint(0, wa.shape[0] - half)
-        sb = random.randint(0, wb.shape[0] - half)
-        spliced = np.concatenate([wa[sa:sa + half], wb[sb:sb + half]])
-        X.append(to_mel(spliced, SR))
-        y.append(0)
+    # Negatives: parallel — each worker does 1 random splice
+    print(f"negatives: {n_neg} random splices...")
+    neg_args = [([str(p) for p in clip_paths], i + 100000) for i in range(n_neg * 2)]
+    X_neg: list[np.ndarray] = []
+    with ctx.Pool(processes=workers) as pool:
+        for r in pool.imap_unordered(_negative_splice_one, neg_args, chunksize=4):
+            if r is not None:
+                X_neg.append(r)
+                if len(X_neg) >= n_neg:
+                    pool.terminate()
+                    break
+    X_neg = X_neg[:n_neg]
 
-    X_arr = np.stack(X).astype(np.float32)
-    y_arr = np.asarray(y, dtype=np.int64)
-    print(f"X={X_arr.shape}, y={y_arr.shape}, pos={int((y_arr==1).sum())}, neg={int((y_arr==0).sum())}")
+    X_arr = np.stack(X_pos + X_neg).astype(np.float32)
+    y_arr = np.concatenate([np.ones(len(X_pos), dtype=np.int64),
+                            np.zeros(len(X_neg), dtype=np.int64)])
+    print(f"X={X_arr.shape}, pos={len(X_pos)}, neg={len(X_neg)}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(str(out_path), X=X_arr, y=y_arr)
     print(f"saved {out_path}")
@@ -267,6 +309,8 @@ def main() -> None:
     p.add_argument("--out", default="datasets/critic.npz")
     p.add_argument("--n_pos", type=int, default=1000)
     p.add_argument("--n_neg", type=int, default=1000)
+    p.add_argument("--workers", type=int, default=0,
+                   help="parallel CPU workers; 0=auto (cpu_count-1, max 8)")
 
     p = sub.add_parser("train")
     p.add_argument("--data", default="datasets/critic.npz")
@@ -282,7 +326,7 @@ def main() -> None:
     args = ap.parse_args()
     if args.cmd == "build-data":
         build_data(Path(args.sets), Path(args.clips), Path(args.out),
-                   args.n_pos, args.n_neg)
+                   args.n_pos, args.n_neg, workers=args.workers)
     elif args.cmd == "train":
         train(Path(args.data), Path(args.ckpt), args.epochs,
               args.batch_size, args.lr)
