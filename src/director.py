@@ -4,7 +4,7 @@ HF instruct-LM Director: user prompt (+ optional preset arc) → validated JSON 
 Produces PlannerConfig-aligned fields plus transition_tiers (major|minor per junction).
 
 Env:
-  HF_DIRECTOR_MODEL   — Hugging Face model id (default: Smol LM instruct class)
+  HF_DIRECTOR_MODEL   — Hugging Face model id (default: Qwen/Qwen2.5-7B-Instruct)
   AIJOCKEY_USE_DIRECTOR_LLM — "0" to skip HF and use deterministic fallback JSON
 """
 from __future__ import annotations
@@ -19,24 +19,43 @@ ALLOWED_ARCS = (
     "build", "peak", "rollercoaster", "descend", "flat_high", "flat_low", "custom"
 )
 
-SYSTEM_PROMPT = """You are a professional club DJ assistant. Output ONLY valid JSON, no markdown.
-Rules:
-- Use transition tier "minor" for most mix points (smooth EQ swaps, crossfades).
-- Use "major" sparingly: only where a noticeable energy or structural shift is warranted.
-- Field transition_tiers: array of strings, each "minor" or "major", length = max_expected_transitions.
+SYSTEM_PROMPT = """You are a professional club DJ. Output ONLY valid JSON, no markdown, no commentary.
 
-Schema keys (all optional except follow user intent):
+Tier policy:
+- "minor": smooth EQ swap or crossfade, used at most mix points.
+- "major": a structurally significant moment — peak drop, energy shift, genre flip, big build resolution. Use sparingly.
+
+Distribution rule: if there are N transitions, target roughly 1-2 majors when arc is "peak"/"rollercoaster", 0 majors when arc is "flat_low" or "descend", 1 when "build". Never all-minor for energetic arcs; never all-major.
+
+Allowed arcs: build, peak, rollercoaster, descend, flat_high, flat_low.
+
+Schema (return EXACT keys, no extras):
 {
-  "arc": string (build|peak|rollercoaster|descend|flat_high|flat_low),
-  "text_prompt": string (natural language mix vibe, may echo user),
-  "surprise_budget": integer 0-50,
-  "callback_budget": integer 0-5,
-  "transition_tiers": ["minor", "minor", "major", ...],
-  "accent_hints": [ { "junction_index": 0, "fx_category": "hihat_rolls", "beats": 2.0 } ],
-  "same_genre_tight_mix": boolean
+  "arc": "build|peak|rollercoaster|descend|flat_high|flat_low",
+  "text_prompt": "<short vibe sentence>",
+  "surprise_budget": <int 0-10>,
+  "callback_budget": <int 0-3>,
+  "transition_tiers": ["minor","major",...],   // length = max_expected_transitions
+  "accent_hints": [ {"junction_index": 0, "fx_category": "hihat_rolls|risers|impacts|sweeps|snare_rolls", "beats": 2.0} ],
+  "same_genre_tight_mix": false
 }
 
-junction_index counts boundaries: 0 = between track 1 and 2 after planning (first transition)."""
+junction_index = 0 means between clip 1 and clip 2.
+
+Examples:
+
+User: "festival peak time, big drops, anthemic" with 5 transitions
+Output:
+{"arc":"peak","text_prompt":"festival peak time euphoric drops","surprise_budget":3,"callback_budget":1,"transition_tiers":["minor","major","minor","major","minor"],"accent_hints":[{"junction_index":1,"fx_category":"risers","beats":4.0},{"junction_index":3,"fx_category":"impacts","beats":1.0}],"same_genre_tight_mix":false}
+
+User: "after-hours noir, smoky melancholy" with 4 transitions
+Output:
+{"arc":"flat_low","text_prompt":"after-hours smoky lo-fi","surprise_budget":1,"callback_budget":0,"transition_tiers":["minor","minor","minor","minor"],"accent_hints":[],"same_genre_tight_mix":true}
+
+User: "wild journey, peaks and drops" with 6 transitions
+Output:
+{"arc":"rollercoaster","text_prompt":"wild peaks and valleys","surprise_budget":4,"callback_budget":2,"transition_tiers":["minor","major","minor","major","minor","major"],"accent_hints":[{"junction_index":1,"fx_category":"risers","beats":4.0},{"junction_index":3,"fx_category":"snare_rolls","beats":2.0}],"same_genre_tight_mix":false}
+"""
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -169,7 +188,7 @@ def run_director(
     if use_llm:
         model_id = os.environ.get(
             "HF_DIRECTOR_MODEL",
-            "HuggingFaceTB/SmolLM2-360M-Instruct",
+            "Qwen/Qwen2.5-7B-Instruct",
         )
         llm_prompt = (
             f"User DJ request:\n{user_prompt}\n\n"
@@ -226,8 +245,10 @@ def _call_hf_instruct(user_message: str, model_id: str) -> str:
     with torch.no_grad():
         gen = model.generate(
             **inputs,
-            max_new_tokens=384,
+            max_new_tokens=512,
             do_sample=False,
+            temperature=1.0,           # ignored when do_sample=False; explicit for clarity
+            repetition_penalty=1.05,
             pad_token_id=tok.pad_token_id or tok.eos_token_id,
         )
     new_tokens = gen[0, inputs["input_ids"].shape[1] :]
