@@ -133,12 +133,28 @@ class Analyzer:
 
         rms = librosa.feature.rms(y=energy_signal)[0]
         rms_times = librosa.frames_to_time(np.arange(len(rms)), sr=SR)
+        # Vocal activity reference (per-section vocals stem RMS / total)
+        vox_rms_ref = None
+        if stems and 'vocals' in stems:
+            vox_mono = stems['vocals'].mean(0).numpy().astype(np.float32)
+            vox_rms_ref = librosa.feature.rms(y=vox_mono)[0]
+            inst_signal = sum(stems[k].mean(0).numpy().astype(np.float32)
+                              for k in ('drums', 'bass', 'other') if k in stems)
+            inst_rms_ref = (librosa.feature.rms(y=inst_signal)[0]
+                            if hasattr(inst_signal, 'shape') else None)
+        else:
+            inst_rms_ref = None
         out: list[dict] = []
         for i in range(len(bound_times) - 1):
             s, e = bound_times[i], bound_times[i + 1]
             mask = (rms_times >= s) & (rms_times < e)
             energy = float(rms[mask].mean()) if mask.any() else 0.0
-            out.append({'start': float(s), 'end': float(e), 'energy': energy})
+            section_dict = {'start': float(s), 'end': float(e), 'energy': energy}
+            if vox_rms_ref is not None and inst_rms_ref is not None and mask.any():
+                v = float(vox_rms_ref[mask].mean())
+                i_ = float(inst_rms_ref[mask].mean()) + 1e-8
+                section_dict['vocal_activity'] = round(v / (v + i_ + 1e-8), 4)
+            out.append(section_dict)
         if not out:
             return out
         peak_e = max(s['energy'] for s in out)

@@ -265,10 +265,14 @@ def _apply_restricted_filter(tech: dict) -> dict:
 def pick_segment(clip: dict, prefer: str | None = None,
                  target_energy: float | None = None,
                  exclude_indices: set | None = None,
-                 min_seconds: float = 30.0) -> tuple[dict, int]:
+                 min_seconds: float = 30.0,
+                 prefer_instrumental: bool = False) -> tuple[dict, int]:
     """
     Returns (segment_dict, segment_index). Filters sections shorter than
     min_seconds. Falls back to longest available if all too short.
+
+    prefer_instrumental: when set, deprioritize vocal-active sections
+    (uses cached vocal_activity field if present, else section.type heuristic).
     """
     sections = clip.get('sections', [])
     if not sections:
@@ -285,6 +289,17 @@ def pick_segment(clip: dict, prefer: str | None = None,
             available = long_enough
         else:
             available = list(enumerate(sections))  # last resort, allow short
+    # Vocal-aware filtering for transition boundaries
+    if prefer_instrumental:
+        def _is_instrumental(sec):
+            va = sec.get('vocal_activity')
+            if va is not None:
+                return float(va) < 0.20
+            # heuristic from section type when vocal_activity unavailable
+            return sec.get('type') in ('intro', 'breakdown', 'outro', 'drop')
+        instrumental = [(i, s) for i, s in available if _is_instrumental(s)]
+        if instrumental:
+            available = instrumental
     if prefer:
         for i, s in available:
             if s.get('type') == prefer:
@@ -436,6 +451,7 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
                     cand, target_energy=target_e,
                     exclude_indices=st.used_segments.get(cid, set()),
                     min_seconds=config.min_segment_seconds,
+                    prefer_instrumental=True,
                 )
                 score, tech, is_surprise = transition_score(
                     last_clip, last.segment, last.target_bpm, last.target_key,
@@ -482,6 +498,7 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
                     cand, target_energy=target_e,
                     exclude_indices=st.used_segments.get(cid, set()),
                     min_seconds=config.min_segment_seconds,
+                    prefer_instrumental=True,
                 )
                 score, tech, _ = transition_score(
                     last_clip, last.segment, last.target_bpm, last.target_key,

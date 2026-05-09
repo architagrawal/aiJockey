@@ -125,6 +125,47 @@ def _suppress_intro_vocals(cur: dict, n_samples: int,
     return out
 
 
+def _suppress_outro_vocals(output: np.ndarray, prev: dict,
+                           n_samples: int,
+                           ramp_out_samples: int = 0) -> np.ndarray:
+    """Mute the outgoing clip's vocals across the last n_samples of `output`,
+    with a pre-overlap ramp-out over ramp_out_samples so the vocals fade
+    rather than abruptly cut.
+
+    Required because output already contains the rendered prev clip with
+    full vocals. We retroactively subtract them in the overlap region.
+    """
+    vox = prev.get('stems', {}).get('vocals')
+    if vox is None or n_samples <= 0 or output.shape[1] == 0:
+        return output
+    out = output.copy()
+    n_samples = int(min(n_samples, out.shape[1]))
+    overlap_start = out.shape[1] - n_samples
+    # Length-align prev vocals to the overlap region (right-aligned)
+    prev_full_len = prev.get('full', vox).shape[1] if hasattr(prev.get('full', vox), 'shape') else vox.shape[1]
+    # vox is the raw stem at full clip length; use the tail to match what was concatenated
+    vox_tail = vox[:, -prev_full_len:] if vox.shape[1] >= prev_full_len else vox
+    # Within the overlap window, subtract the corresponding tail vocals
+    if vox_tail.shape[1] >= n_samples:
+        vox_overlap = vox_tail[:, -n_samples:]
+    else:
+        # zero-pad on the left
+        pad = n_samples - vox_tail.shape[1]
+        vox_overlap = np.concatenate([np.zeros((vox_tail.shape[0], pad), dtype=vox_tail.dtype),
+                                      vox_tail], axis=1)
+    out[:, overlap_start:] -= vox_overlap[:, :n_samples]
+    # Ramp-out: gradually fade vocals BEFORE overlap region
+    if ramp_out_samples > 0:
+        ramp_n = min(ramp_out_samples, overlap_start)
+        if ramp_n > 0:
+            ramp = np.linspace(0.0, 1.0, ramp_n, dtype=np.float32)
+            ramp_start = overlap_start - ramp_n
+            if vox_tail.shape[1] >= n_samples + ramp_n:
+                vox_ramp = vox_tail[:, -(n_samples + ramp_n):-n_samples]
+                out[:, ramp_start:overlap_start] -= vox_ramp * ramp
+    return out
+
+
 def apply_transition(output: np.ndarray, prev: dict, cur: dict,
                      sample_bank: SampleBank, target_bpm: float) -> np.ndarray:
     tech = cur['entry']['transition_in']
@@ -132,25 +173,29 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
     bars = int(tech.get('bars', 16))
     beat_dur = 60.0 / max(target_bpm, 1.0)
     overlap_n = int(bars * 4 * beat_dur * SR)
+    ramp = int(beat_dur * SR * 2)
     # Build vocal-suppressed cur for overlap-style transitions
     cur_no_intro_vox = dict(cur)
     cur_no_intro_vox['full'] = _suppress_intro_vocals(
-        cur, n_samples=overlap_n, ramp_in_samples=int(beat_dur * SR * 2))
+        cur, n_samples=overlap_n, ramp_in_samples=ramp)
+    # Also suppress outgoing vocals during the same overlap region
+    output_no_outro_vox = _suppress_outro_vocals(
+        output, prev, n_samples=overlap_n, ramp_out_samples=ramp)
 
     if name in ('cut', 'fade_in'):
         return T.cut_transition(output, cur['full'])
     if name == 'crossfade':
-        return T.crossfade_transition(output, cur_no_intro_vox['full'], SR, bars, beat_dur)
+        return T.crossfade_transition(output_no_outro_vox, cur_no_intro_vox['full'], SR, bars, beat_dur)
     if name == 'eq_swap':
         # Embellish: hi-hat roll lead-in to incoming on energy lift
-        out = T.eq_swap_transition(output, cur_no_intro_vox['full'], SR, bars, beat_dur)
+        out = T.eq_swap_transition(output_no_outro_vox, cur_no_intro_vox['full'], SR, bars, beat_dur)
         if cur['entry']['segment'].get('energy', 0.5) > 0.7:
             roll = sample_bank.get_fx('hihat_rolls', target_bpm, beats=2.0)
             roll_at = max(0, out.shape[1] - cur['full'].shape[1] - int(2 * beat_dur * SR))
             out = T.overlay_sample(out, roll, roll_at, gain=0.35)
         return out
     if name == 'filter_fade':
-        out = T.filter_fade_transition(output, cur_no_intro_vox['full'], SR, bars, beat_dur)
+        out = T.filter_fade_transition(output_no_outro_vox, cur_no_intro_vox['full'], SR, bars, beat_dur)
         # Down-sweep accentuates filter close
         sweep = sample_bank.get_fx('sweeps', target_bpm, beats=float(bars))
         sweep_at = max(0, out.shape[1] - cur['full'].shape[1] - int(bars * 4 * beat_dur * SR))
@@ -200,7 +245,7 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
                                       out_full_remainder=body)
     if name == 'echo_out':
         return T.echo_out_transition(
-            output, cur_no_intro_vox['full'], SR, bars, beat_dur,
+            output_no_outro_vox, cur_no_intro_vox['full'], SR, bars, beat_dur,
             delay_beats=float(tech.get('delay_beats', 0.5)),
             feedback=float(tech.get('feedback', 0.55)),
         )
