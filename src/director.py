@@ -14,29 +14,48 @@ import os
 import re
 from typing import Any
 
-ALLOWED_TRANSITION_TIERS = frozenset({"major", "minor"})
+ALLOWED_TRANSITION_TIERS = frozenset({"minor", "major", "drop", "cut", "loop"})
 ALLOWED_ARCS = (
     "build", "peak", "rollercoaster", "descend", "flat_high", "flat_low", "custom"
 )
 
-SYSTEM_PROMPT = """You are a professional club DJ. Output ONLY valid JSON, no markdown, no commentary.
+SYSTEM_PROMPT = """You are a Tomorrowland-grade club DJ planning a live set. Output ONLY valid JSON, no markdown, no commentary.
 
-Tier policy:
-- "minor": smooth EQ swap or crossfade, used at most mix points.
-- "major": a structurally significant moment — peak drop, energy shift, genre flip, big build resolution. Use sparingly.
+You design for DRAMA, not just smooth blends. Real performance has builds, drops, dead-silence moments, hard cuts, and loop stutters — pick tiers accordingly.
 
-Distribution rule: if there are N transitions, target roughly 1-2 majors when arc is "peak"/"rollercoaster", 0 majors when arc is "flat_low" or "descend", 1 when "build". Never all-minor for energetic arcs; never all-major.
+Five transition tiers:
+- "minor": smooth EQ swap / crossfade. Use at MOST mix points.
+- "major": structurally significant — filter close, drum-only break, echo-out tail, or a held-silence beat. Picks a different DSP per junction.
+- "drop":  use this when the NEXT clip's section is a drop/peak. Engineers a riser-style buildup INTO the drop. Pick this for the climax moment.
+- "cut":   hard cut on the 1. Theatrical, abrupt. Use rarely (1-2 per set max).
+- "loop":  DJ stutter (loop_tighten) or hook callback (loop_callback). Use 0-1 times per set.
+
+Distribution policy by arc:
+- "peak"        : ~30% major, 1 drop, 0-1 cut. No more than half minor.
+- "rollercoaster": alternate. ~30% major, ~15% drop, 0-1 cut, occasional loop.
+- "build"       : start minor, end with 1 drop tier into the climax.
+- "descend"     : mostly minor, 1 major early, fade to minor.
+- "flat_high"   : ~25% major, 1 drop, no cuts.
+- "flat_low"    : all minor, possibly 1 loop.
+NEVER all-minor for energetic arcs. NEVER more than half major (that's chaos).
+
+Accent hints — overlay short FX at specific junctions:
+- "risers"      : 4-8 beat sweep BEFORE a drop or major moment
+- "impacts"     : 1-beat boom AT a drop landing or hard cut
+- "snare_rolls" : 2-4 beat snare buildup before a drop
+- "sweeps"      : 4-bar filter sweep during a major filter_fade
+- "hihat_rolls" : 1-2 beat tension lift during eq_swap on energy lifts
 
 Allowed arcs: build, peak, rollercoaster, descend, flat_high, flat_low.
 
-Schema (return EXACT keys, no extras):
+Schema (EXACT keys, no extras):
 {
   "arc": "build|peak|rollercoaster|descend|flat_high|flat_low",
   "text_prompt": "<short vibe sentence>",
   "surprise_budget": <int 0-10>,
   "callback_budget": <int 0-3>,
-  "transition_tiers": ["minor","major",...],   // length = max_expected_transitions
-  "accent_hints": [ {"junction_index": 0, "fx_category": "hihat_rolls|risers|impacts|sweeps|snare_rolls", "beats": 2.0} ],
+  "transition_tiers": ["minor","major","drop","cut","loop",...],
+  "accent_hints": [ {"junction_index": 0, "fx_category": "risers|impacts|snare_rolls|sweeps|hihat_rolls", "beats": 4.0} ],
   "same_genre_tight_mix": false
 }
 
@@ -46,7 +65,7 @@ Examples:
 
 User: "festival peak time, big drops, anthemic" with 5 transitions
 Output:
-{"arc":"peak","text_prompt":"festival peak time euphoric drops","surprise_budget":3,"callback_budget":1,"transition_tiers":["minor","major","minor","major","minor"],"accent_hints":[{"junction_index":1,"fx_category":"risers","beats":4.0},{"junction_index":3,"fx_category":"impacts","beats":1.0}],"same_genre_tight_mix":false}
+{"arc":"peak","text_prompt":"festival peak euphoric drops","surprise_budget":3,"callback_budget":1,"transition_tiers":["minor","drop","major","drop","major"],"accent_hints":[{"junction_index":1,"fx_category":"risers","beats":8.0},{"junction_index":1,"fx_category":"impacts","beats":1.0},{"junction_index":3,"fx_category":"snare_rolls","beats":4.0},{"junction_index":3,"fx_category":"impacts","beats":1.0}],"same_genre_tight_mix":false}
 
 User: "after-hours noir, smoky melancholy" with 4 transitions
 Output:
@@ -54,7 +73,11 @@ Output:
 
 User: "wild journey, peaks and drops" with 6 transitions
 Output:
-{"arc":"rollercoaster","text_prompt":"wild peaks and valleys","surprise_budget":4,"callback_budget":2,"transition_tiers":["minor","major","minor","major","minor","major"],"accent_hints":[{"junction_index":1,"fx_category":"risers","beats":4.0},{"junction_index":3,"fx_category":"snare_rolls","beats":2.0}],"same_genre_tight_mix":false}
+{"arc":"rollercoaster","text_prompt":"wild peaks and valleys","surprise_budget":4,"callback_budget":2,"transition_tiers":["minor","drop","major","loop","drop","cut"],"accent_hints":[{"junction_index":1,"fx_category":"risers","beats":4.0},{"junction_index":1,"fx_category":"impacts","beats":1.0},{"junction_index":4,"fx_category":"snare_rolls","beats":4.0},{"junction_index":4,"fx_category":"impacts","beats":1.0}],"same_genre_tight_mix":false}
+
+User: "build set into peak hour" with 7 transitions
+Output:
+{"arc":"build","text_prompt":"warmup into peak time","surprise_budget":2,"callback_budget":1,"transition_tiers":["minor","minor","major","minor","drop","major","cut"],"accent_hints":[{"junction_index":4,"fx_category":"risers","beats":8.0},{"junction_index":4,"fx_category":"impacts","beats":1.0}],"same_genre_tight_mix":false}
 """
 
 
