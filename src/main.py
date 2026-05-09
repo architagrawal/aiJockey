@@ -45,11 +45,23 @@ def cmd_plan(args: argparse.Namespace) -> None:
     director_out: dict | None = None
     if getattr(args, 'use_director', False):
         from director import run_director
+        # Collect audio paths for multimodal Director (used when
+        # HF_DIRECTOR_MODEL is an audio-LLM, e.g. Qwen2-Audio).
+        audio_paths: list[str] = []
+        clips_dir = getattr(args, 'clips', None)
+        if clips_dir:
+            from pathlib import Path as _P
+            cd = _P(clips_dir)
+            if cd.exists():
+                for ext in ('*.wav', '*.mp3', '*.flac', '*.m4a', '*.ogg'):
+                    for p in sorted(cd.glob(ext)):
+                        audio_paths.append(str(p))
         director_out = run_director(
             user_prompt=getattr(args, 'prompt', None) or '',
             arc_preset=getattr(args, 'arc', 'build'),
             clip_count_estimate=len(clips),
             approx_duration_seconds=float(args.duration),
+            audio_clip_paths=audio_paths or None,
         )
         print(f"[director] arc={director_out.get('arc')} "
               f"prompt='{(director_out.get('text_prompt') or '')[:60]}' "
@@ -138,11 +150,23 @@ def cmd_all(args: argparse.Namespace) -> None:
     director_out: dict | None = None
     if getattr(args, 'use_director', False):
         from director import run_director
+        # Collect audio paths for multimodal Director (used when
+        # HF_DIRECTOR_MODEL is an audio-LLM, e.g. Qwen2-Audio).
+        audio_paths: list[str] = []
+        clips_dir = getattr(args, 'clips', None)
+        if clips_dir:
+            from pathlib import Path as _P
+            cd = _P(clips_dir)
+            if cd.exists():
+                for ext in ('*.wav', '*.mp3', '*.flac', '*.m4a', '*.ogg'):
+                    for p in sorted(cd.glob(ext)):
+                        audio_paths.append(str(p))
         director_out = run_director(
             user_prompt=getattr(args, 'prompt', None) or '',
             arc_preset=getattr(args, 'arc', 'build'),
             clip_count_estimate=len(clips),
             approx_duration_seconds=float(args.duration),
+            audio_clip_paths=audio_paths or None,
         )
         print(f"[director] arc={director_out.get('arc')} "
               f"prompt='{(director_out.get('text_prompt') or '')[:60]}' "

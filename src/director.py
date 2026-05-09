@@ -171,10 +171,15 @@ def run_director(
     coherence_hint: float | None = None,
     max_transitions_hint: int | None = None,
     approx_duration_seconds: float = 600.0,
+    audio_clip_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Returns sanitized director dict compatible with PlannerConfig + apply_llm_transition_tiers.
     max_transitions = max(clip_count_estimate - 1, min(estimated_timeline_slots, ...))
+
+    If audio_clip_paths provided AND HF_DIRECTOR_MODEL contains 'Audio',
+    a multimodal audio-aware Director (e.g. Qwen2-Audio) is used. The model
+    actually hears each clip's first window before producing the JSON plan.
     """
     arc_fb = arc_preset if arc_preset in ALLOWED_ARCS else "build"
     if max_transitions_hint is not None:
@@ -190,15 +195,18 @@ def run_director(
             "HF_DIRECTOR_MODEL",
             "Qwen/Qwen2.5-7B-Instruct",
         )
+        is_audio_model = "audio" in model_id.lower() and audio_clip_paths
         llm_prompt = (
             f"User DJ request:\n{user_prompt}\n\n"
             f"Suggested arc preset: {arc_fb}\n"
-            f"Rough clip pool size ~{clip_count_estimate}, "
+            f"Clip pool size: {clip_count_estimate}, "
             f"produce transition_tiers of length exactly {mt}.\n"
-            f"{SYSTEM_PROMPT}"
         )
         try:
-            out_text = _call_hf_instruct(llm_prompt, model_id)
+            if is_audio_model:
+                out_text = _call_qwen2audio(llm_prompt, audio_clip_paths, model_id)
+            else:
+                out_text = _call_hf_instruct(llm_prompt + "\n" + SYSTEM_PROMPT, model_id)
             parsed = _extract_json_object(out_text or "")
             if parsed:
                 return _sanitize_out(parsed, arc_fb, user_prompt, mt, coherence_hint)
@@ -207,6 +215,74 @@ def run_director(
 
     fb = _fallback_director(user_prompt, arc_fb, mt)
     return _sanitize_out(fb, arc_fb, user_prompt, mt, coherence_hint)
+
+
+_AUDIO_LLM_CACHE: tuple[Any, Any, str] | None = None
+
+
+def _call_qwen2audio(user_message: str, audio_paths: list[str],
+                     model_id: str,
+                     window_seconds: float = 30.0,
+                     max_clips: int = 6) -> str:
+    """Multimodal Director: model hears the first ~30s of each clip + reads
+    the user message + system prompt, then emits JSON."""
+    global _AUDIO_LLM_CACHE
+    import torch
+    import librosa
+
+    if _AUDIO_LLM_CACHE and _AUDIO_LLM_CACHE[2] == model_id:
+        proc, model = _AUDIO_LLM_CACHE[0], _AUDIO_LLM_CACHE[1]
+    else:
+        from transformers import Qwen2AudioForConditionalGeneration, AutoProcessor
+        proc = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        model = Qwen2AudioForConditionalGeneration.from_pretrained(
+            model_id, torch_dtype=dtype,
+            device_map="auto" if torch.cuda.is_available() else None,
+            trust_remote_code=True,
+        )
+        if not torch.cuda.is_available():
+            model = model.cpu()
+        _AUDIO_LLM_CACHE = (proc, model, model_id)
+
+    audios: list = []
+    target_sr = 16000
+    for p in audio_paths[:max_clips]:
+        try:
+            y, _sr = librosa.load(p, sr=target_sr, mono=True, duration=window_seconds)
+            audios.append(y)
+        except Exception as e:
+            print(f"[director-audio] skip {p}: {e}")
+
+    if not audios:
+        # No audio loaded — fall back to text path
+        return _call_hf_instruct(user_message + "\n" + SYSTEM_PROMPT,
+                                 "Qwen/Qwen2.5-7B-Instruct")
+
+    # Build conversation with one <audio> placeholder per clip
+    user_content: list[dict] = []
+    for i, _ in enumerate(audios):
+        user_content.append({"type": "audio", "audio_url": f"clip_{i}"})
+    user_content.append({"type": "text", "text": user_message})
+    conversation = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+    text = proc.apply_chat_template(conversation, add_generation_prompt=True,
+                                    tokenize=False)
+    inputs = proc(text=text, audios=audios, return_tensors="pt", padding=True,
+                  sampling_rate=target_sr)
+    if torch.cuda.is_available():
+        inputs = {k: v.cuda() if hasattr(v, "cuda") else v for k, v in inputs.items()}
+    with torch.no_grad():
+        gen = model.generate(
+            **inputs,
+            max_new_tokens=512,
+            do_sample=False,
+            pad_token_id=proc.tokenizer.pad_token_id or proc.tokenizer.eos_token_id,
+        )
+    new_tokens = gen[0, inputs["input_ids"].shape[1]:]
+    return proc.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
 
 _LLM_CACHE: tuple[Any, Any, str] | None = None
