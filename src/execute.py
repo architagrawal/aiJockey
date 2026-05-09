@@ -169,10 +169,25 @@ def _suppress_outro_vocals(output: np.ndarray, prev: dict,
     return out
 
 
+# Transitions where output length is NOT prev_len + cur_len (concat/insert/loop):
+# accent overlay offset based on cur length is unreliable, skip.
+_ACCENT_INCOMPATIBLE = frozenset({
+    'scratch_fill',     # concat: prev + scratch + cur
+    'silence_drop',     # inserts silence + impacts at boundary
+    'drum_break',       # body + drum_seg + cur
+    'loop_callback',    # cuts to looped cur
+    'spinback',         # has own vinyl FX at boundary
+    'loop_tighten',     # has own riser/airhorn
+})
+
+
 def _overlay_accent_hint(out: np.ndarray, cur: dict, sample_bank: SampleBank,
                          target_bpm: float, beat_dur: float) -> np.ndarray:
     ah = cur['entry'].get('accent_hint')
     if not ah:
+        return out
+    tech_name = cur['entry'].get('transition_in', {}).get('name', 'crossfade')
+    if tech_name in _ACCENT_INCOMPATIBLE:
         return out
     cat = ah.get('fx_category', 'hihat_rolls')
     beats = float(ah.get('beats', 2.0))

@@ -72,6 +72,28 @@ EXPORT_FLAC = "flac"
 app = FastAPI(title="AiJockey")
 
 
+@app.on_event("startup")
+def _warmup_director() -> None:
+    """Pre-load HF Director model so first /generate doesn't pay download/load cost.
+
+    Skipped if AIJOCKEY_USE_DIRECTOR_LLM=0 or AIJOCKEY_WARMUP=0.
+    """
+    if os.environ.get("AIJOCKEY_USE_DIRECTOR_LLM", "1").lower() in ("0", "false", "no"):
+        return
+    if os.environ.get("AIJOCKEY_WARMUP", "1").lower() in ("0", "false", "no"):
+        return
+    try:
+        from director import run_director
+        run_director(
+            user_prompt="warmup", arc_preset="build",
+            clip_count_estimate=2, max_transitions_hint=2,
+            approx_duration_seconds=60.0,
+        )
+        jlog("-", "warmup_director_ok")
+    except Exception as e:
+        jlog("-", "warmup_director_failed", err=str(e)[:300])
+
+
 def touch_idle() -> None:
     try:
         IDLE_FILE.write_text(str(int(time.time())))
