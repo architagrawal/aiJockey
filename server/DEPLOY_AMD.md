@@ -1,5 +1,7 @@
 # Deploy AiJockey API on AMD Developer Cloud (MI300X / ROCm)
 
+For **coding agents** (Claude Code, Cursor, etc.): read repo root [**AGENTS.md**](../AGENTS.md) first for architecture, env vars, `/generate` contract, and deploy pitfalls.
+
 This is the **GPU worker** behind the Hugging Face Space. The Space only proxies uploads; all Demucs, CLAP, optional Director LLM, and mixing run here.
 
 ## One-time on the instance
