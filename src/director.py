@@ -181,9 +181,10 @@ CONSTRAINTS:
 - accents: cap 2 per junction. Use on major/drop tier only.
   Categories: risers, impacts, snare_rolls, sweeps, hihat_rolls, sub_drops
 - Prefer NO accent over a forced one.
-- If pool is too disparate (low coherence, no clusters), say so in `narrative_notes` and use mostly minor tiers — admit limitation rather than fake drama.
+- If pool is too disparate (low coherence, no clusters), say so in `narrative_notes` and use MOSTLY minor tiers (>=60%) — but ALWAYS allow at least 1-2 `major` picks per 10 junctions to mark intentional genre jumps. ALL-MINOR is FORBIDDEN — it produces a flat, boring mix the user notices immediately. Even a "journey" set needs occasional sectional markers.
 - HARD RULE on incompatible bridges: NEVER use `drop` or `major` tier for a junction whose two clips differ in genre cluster AND have BPM gap > 8 BPM. That combination produces audible energy mismatch + phase cancellation (verified: probe severity ≥ 0.85 on every such forced junction). When forced into such a bridge, use `minor` with intent `breath` or `cooldown` — let the listener absorb the cluster shift, don't paper it over with a drop.
-- Listen to your narrative_notes: if you write "pool too disparate" or "navigate as journey", you MUST emit ALL minor tiers. Mixing that admission with a drop tier later is incoherent.
+- TIER DIVERSITY MINIMUM: out of N junctions, at most ceil(N * 0.75) may be `minor`. Remaining must be `major` (or `drop` when pool truly supports it). Pick the major picks at the most BPM/key/energy-compatible junctions. Even on disparate pools, find the 2-3 junctions where a major fits and mark them — don't blanket-minor.
+- VOCAL-AWARE TIER PLACEMENT: prefer placing `major`/`drop` tiers at junctions where BOTH adjacent clips have an INSTRUMENTAL section available (label='inst' / 'break' / 'bridge' / 'solo' / 'breakdown'). The execute layer's vocal_guard would clamp aggressive techniques on vocal-active junctions anyway — wasting the tier slot. Pick vocal-light junctions for major/drop.
 
 OUTPUT SCHEMA (EXACT keys, no extras):
 {

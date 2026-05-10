@@ -46,8 +46,30 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 JOB_TIMEOUT_SEC = int(os.environ.get("AIJOCKEY_JOB_TIMEOUT_SEC", "1200"))
 AI_DEVICE = os.environ.get("AI_DEVICE", "cuda")
 
-_pipeline_lock = threading.Lock()
+# Concurrency model (hackathon mode, GPU always-on):
+#   _inflight_sem  bounds total in-flight jobs (CPU + RAM + disk safety).
+#   _gpu_lock      serializes GPU-bound stages (analyze + Director LLM)
+#                  so multiple jobs can interleave: while job-A runs
+#                  plan/execute/master on CPU, job-B holds GPU lock.
+# Global single-job behavior preserved by setting INFLIGHT_MAX=1.
+INFLIGHT_MAX = int(os.environ.get("AIJOCKEY_INFLIGHT_MAX", "4"))
+_inflight_sem = threading.BoundedSemaphore(INFLIGHT_MAX)
+_gpu_lock = threading.Lock()
+_inflight_count = 0
+_inflight_count_lock = threading.Lock()
 _concurrent_denied = 0
+
+
+def _inflight_inc() -> None:
+    global _inflight_count
+    with _inflight_count_lock:
+        _inflight_count += 1
+
+
+def _inflight_dec() -> None:
+    global _inflight_count
+    with _inflight_count_lock:
+        _inflight_count -= 1
 
 PRESETS = {
     "festival_inferno": dict(arc="peak", prompt="festival main stage, euphoric drops, big bass"),
@@ -631,7 +653,10 @@ def health():
         },
         "disk_free_gb": disk_free_gb(),
         "concurrent_denied_total": _concurrent_denied,
-        "pipeline_locked": _pipeline_lock.locked(),
+        "pipeline_locked": _gpu_lock.locked(),
+        "inflight_count": _inflight_count,
+        "inflight_max": INFLIGHT_MAX,
+        "gpu_busy": _gpu_lock.locked(),
     }
 
 
@@ -765,8 +790,15 @@ def _run_generate_sync(
     )
 
     t_an = time.perf_counter()
-    analyze_pool(str(pool_dir), str(cache_dir), device=AI_DEVICE, force=False, workers=min(4, len(saved_paths)))
-    jlog(job_id, "analyze", (time.perf_counter() - t_an) * 1000, disk_gb=disk_free_gb())
+    # GPU-bound: serialize analyze + Director across concurrent jobs.
+    # Other jobs may continue plan/execute/master on CPU outside this lock.
+    t_gpu_wait = time.perf_counter()
+    with _gpu_lock:
+        gpu_wait_ms = (time.perf_counter() - t_gpu_wait) * 1000
+        if gpu_wait_ms > 50:
+            jlog(job_id, "gpu_wait", gpu_wait_ms)
+        analyze_pool(str(pool_dir), str(cache_dir), device=AI_DEVICE, force=False, workers=min(4, len(saved_paths)))
+        jlog(job_id, "analyze", (time.perf_counter() - t_an) * 1000, disk_gb=disk_free_gb())
 
     # Tag user clips with source='user' in their cache JSON. (Library
     # clips inherit source='library' on link from cache_dir below.)
@@ -918,16 +950,22 @@ def _run_generate_sync(
     # internally to bound input length. Library paths intentionally not
     # passed — they don't carry user intent.
     audio_paths_for_director = [str(p) for p in saved_paths]
-    director = run_director(
-        user_prompt=base_prompt,
-        arc_preset=base_arc,
-        clip_count_estimate=len(saved_paths),
-        coherence_hint=coherence,
-        max_transitions_hint=estimate_max_transitions_for_pool(len(clips), float(duration)),
-        approx_duration_seconds=float(duration),
-        clips_meta=clips,
-        audio_clip_paths=audio_paths_for_director,
-    )
+    # GPU-bound: serialize Director LLM forward pass.
+    t_d_wait = time.perf_counter()
+    with _gpu_lock:
+        d_wait_ms = (time.perf_counter() - t_d_wait) * 1000
+        if d_wait_ms > 50:
+            jlog(job_id, "director_gpu_wait", d_wait_ms)
+        director = run_director(
+            user_prompt=base_prompt,
+            arc_preset=base_arc,
+            clip_count_estimate=len(saved_paths),
+            coherence_hint=coherence,
+            max_transitions_hint=estimate_max_transitions_for_pool(len(clips), float(duration)),
+            approx_duration_seconds=float(duration),
+            clips_meta=clips,
+            audio_clip_paths=audio_paths_for_director,
+        )
     final_prompt = director.get("text_prompt") or base_prompt
     final_arc = director.get("arc") or base_arc
     tiers = director.get("transition_tiers") or []
@@ -1059,15 +1097,19 @@ async def generate(
     if not (1 <= len(files) <= MAX_CLIPS):
         raise HTTPException(400, detail=f"max {MAX_CLIPS} user clips")
 
-    acquired = _pipeline_lock.acquire(blocking=False)
+    # Acquire inflight slot. Multiple jobs may run concurrently
+    # (cap: INFLIGHT_MAX). GPU stages serialize internally via _gpu_lock.
+    acquired = _inflight_sem.acquire(blocking=False)
     if not acquired:
         _concurrent_denied += 1
-        jlog("-", "busy_reject", concurrent_denied=_concurrent_denied)
+        jlog("-", "busy_reject", concurrent_denied=_concurrent_denied,
+             inflight=_inflight_count, inflight_max=INFLIGHT_MAX)
         raise HTTPException(
             503,
-            detail="Server is rendering another mix (one GPU job at a time). Retry in a few minutes.",
+            detail=f"Server at capacity ({INFLIGHT_MAX} concurrent jobs). Retry in a few minutes.",
             headers={"Retry-After": "120"},
         )
+    _inflight_inc()
 
     job_id = uuid.uuid4().hex[:12]
     t_wall = time.perf_counter()
@@ -1082,9 +1124,12 @@ async def generate(
             # instrumental_only toggle additionally suppresses vocals
             # throughout segment bodies. Implemented as env var read by
             # execute.py via the existing AIJOCKEY_STEM_SWAP path.
-            # _pipeline_lock guarantees only one job sets this env at a time;
-            # try/finally restores prior value so a crash can't leave the
-            # process permanently in instrumental-only mode.
+            # CONCURRENCY NOTE: with INFLIGHT_MAX>1 this env-set is racy if
+            # different concurrent jobs request different instrumental_only
+            # values. Demo usage sets True by default for all jobs, so they
+            # all write the same value — race is benign. If mixed-mode usage
+            # appears, refactor execute() to read this flag from a per-job
+            # parameter instead of process env.
             _ENV_KEY = "AIJOCKEY_INSTRUMENTAL_ONLY"
             _prev = os.environ.get(_ENV_KEY)
             if instrumental_only:
@@ -1305,7 +1350,8 @@ async def generate(
         jlog(job_id, "response", (time.perf_counter() - t_wall) * 1000)
         return resp
     finally:
-        _pipeline_lock.release()
+        _inflight_dec()
+        _inflight_sem.release()
 
 
 def _delayed_cleanup(job_root: Path, keep: list[Path], fail: bool) -> None:

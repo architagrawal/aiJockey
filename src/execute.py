@@ -148,6 +148,99 @@ def _load_one_stem(fp: Path) -> np.ndarray | None:
     return wav.numpy().astype(np.float32)
 
 
+def snap_segment_end_to_vocal_silence(timeline: list[dict],
+                                       clips_meta: dict[str, dict],
+                                       cache_dir: str = 'cache',
+                                       look_ahead_sec: float = 5.0,
+                                       look_back_sec: float = 1.5,
+                                       quiet_threshold_db: float = -36.0,
+                                       quiet_min_dur: float = 0.25,
+                                       ) -> list[dict]:
+    """Snap segment.end to nearest vocal-quiet point so transitions never
+    cut a vocal phrase mid-flow. Operates only when vocals stem available.
+
+    For each non-final entry: scan vocals stem RMS in
+    [end - look_back_sec, end + look_ahead_sec]. Find earliest window of
+    duration >= quiet_min_dur where RMS < threshold. Snap segment.end to
+    start of that window. If no quiet window in the look-ahead, leave end
+    alone (do NOT truncate vocals abruptly — extending a few seconds is
+    musical, cutting is not).
+
+    Skips entry when:
+      - vocals stem missing
+      - vocals are essentially silent throughout (instrumental clip)
+      - quiet window already at/before original end
+    """
+    import os
+    if os.environ.get('AIJOCKEY_VOCAL_END_SNAP', '1') == '0':
+        return timeline
+    if len(timeline) < 2:
+        return timeline
+    snapped = 0
+    for entry in timeline[:-1]:
+        cid = entry.get('clip_id')
+        seg = entry.get('segment') or {}
+        if 'end' not in seg or 'start' not in seg:
+            continue
+        meta = clips_meta.get(cid) or {}
+        clip_dur = float(meta.get('duration', seg['end']))
+        vfp = Path(cache_dir) / 'stems' / cid / 'vocals.wav'
+        if not vfp.exists():
+            continue
+        try:
+            wav, sr = torchaudio.load(str(vfp))
+            if wav.size(0) > 1:
+                wav = wav.mean(dim=0, keepdim=False)
+            else:
+                wav = wav.squeeze(0)
+            v = wav.numpy().astype(np.float32)
+        except Exception:
+            continue
+        # If clip is mostly instrumental (vocals near silent), no need to snap
+        global_rms = float(np.sqrt(np.mean(v[: int(min(len(v), 30 * sr))] ** 2) + 1e-12))
+        if global_rms < 10 ** (quiet_threshold_db / 20.0) * 1.5:
+            continue
+        end_s = float(seg['end'])
+        scan_start = max(0.0, end_s - look_back_sec)
+        scan_end = min(clip_dur, end_s + look_ahead_sec)
+        i0, i1 = int(scan_start * sr), int(scan_end * sr)
+        if i1 <= i0 + sr // 4:
+            continue
+        seg_audio = v[i0:i1]
+        win = max(1, int(0.10 * sr))   # 100ms RMS window
+        # Vectorized RMS via cumulative sum of squares
+        sq = seg_audio ** 2
+        cs = np.concatenate(([0.0], np.cumsum(sq)))
+        rms = np.sqrt((cs[win:] - cs[:-win]) / win + 1e-12)
+        thr_lin = 10 ** (quiet_threshold_db / 20.0)
+        quiet_mask = rms < thr_lin
+        # Need a run of >= quiet_min_dur seconds (in 100ms hops)
+        need_hops = max(1, int(quiet_min_dur * sr / win))
+        # Find earliest run of `need_hops` consecutive True
+        run = 0
+        snap_idx = -1
+        for k, q in enumerate(quiet_mask):
+            run = run + 1 if q else 0
+            if run >= need_hops:
+                snap_idx = k - need_hops + 1
+                break
+        if snap_idx < 0:
+            continue
+        # Convert idx in seg_audio back to absolute clip seconds
+        new_end = scan_start + (snap_idx * win) / sr
+        if new_end <= float(seg['start']) + 0.5:
+            continue   # would create degenerate segment
+        if abs(new_end - end_s) < 0.10:
+            continue   # already aligned
+        seg['end'] = float(new_end)
+        seg['vocal_end_snapped'] = True
+        seg['vocal_end_snap_delta'] = round(new_end - end_s, 3)
+        snapped += 1
+    if snapped:
+        print(f"vocal-end-snap: adjusted {snapped}/{len(timeline)-1} junctions to vocal-quiet boundary")
+    return timeline
+
+
 def load_stems(clip_id: str, cache_dir: str = 'cache') -> dict[str, np.ndarray]:
     base = Path(cache_dir) / 'stems' / clip_id
     names = ('drums', 'bass', 'other', 'vocals')
@@ -751,6 +844,11 @@ def execute(timeline_path: str, cache_dir: str, out_path: str,
         moved = sum(1 for (a, e) in zip(before, tl)
                     if a != (e['segment'].get('start'), e['segment'].get('end')))
         print(f"phrase-quantize: snapped {moved}/{len(tl)} segment boundaries")
+
+    # Vocal-phrase end snap: never cut a vocal mid-flow at junction. Run
+    # AFTER phrase-quantize so we may slightly drift past phrase boundary
+    # to land in a vocal-quiet pocket. AIJOCKEY_VOCAL_END_SNAP=0 disables.
+    snap_segment_end_to_vocal_silence(tl, clips_meta, cache_dir=cache_dir)
 
     # Constitutional validation. Hard musical-rule layer above LLM choices.
     # Set AIJOCKEY_CONSTITUTIONAL=0 to disable.
