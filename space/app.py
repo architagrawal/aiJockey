@@ -34,6 +34,9 @@ LUFS_OPTIONS = {"streaming (-14)": -14, "club (-9)": -9, "competition (-6)": -6}
 MIN_CLIPS, MAX_CLIPS = 2, 8
 MIN_DURATION, MAX_DURATION_HARD = 30, 600
 BACKEND_TIMEOUT_SEC = 1200
+MAX_FILE_MB = 75
+MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024
+ALLOWED_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
 
 USER_PALETTE = [
     "#ff2d6f", "#22d3ee", "#facc15", "#a3e635",
@@ -59,16 +62,52 @@ def _probe_total_duration(file_paths):
     return total
 
 
+def _validate_uploads(files) -> tuple[list[str], list[str]]:
+    """Return (errors, oversized) lists. Errors halt submit; oversized = soft warn."""
+    errs: list[str] = []
+    oversized: list[str] = []
+    if not files:
+        return errs, oversized
+    for f in files:
+        path = f.name if hasattr(f, "name") else f
+        try:
+            sz = os.path.getsize(path)
+        except Exception:
+            errs.append(f"{Path(path).name}: cannot read")
+            continue
+        ext = Path(path).suffix.lower()
+        if ext not in ALLOWED_EXTS:
+            errs.append(f"{Path(path).name}: unsupported format {ext} "
+                        f"(allowed: {', '.join(sorted(ALLOWED_EXTS))})")
+            continue
+        if sz > MAX_FILE_BYTES:
+            oversized.append(f"{Path(path).name}: {sz/1024/1024:.1f} MB > "
+                             f"{MAX_FILE_MB} MB cap")
+    return errs, oversized
+
+
 def update_duration_info(files, use_library):
     paths = [f.name if hasattr(f, "name") else f for f in (files or [])]
+    errs, oversized = _validate_uploads(files)
     total = _probe_total_duration(paths)
     if use_library:
         max_dur = MAX_DURATION_HARD
     else:
         max_dur = max(MIN_DURATION, min(MAX_DURATION_HARD, int(total))) if total else MIN_DURATION
-    return (f"**{len(paths)}** clips · uploaded **{total:.0f}s** · "
-            f"recommended max length **{max_dur}s** "
-            f"(library {'on' if use_library else 'off'})")
+    n_ok = len(paths) - len(errs) - len(oversized)
+    parts = [
+        f"**{len(paths)}** clip(s) · {n_ok} valid · "
+        f"uploaded **{total:.0f}s** · "
+        f"max length **{max_dur}s** "
+        f"(library {'on' if use_library else 'off'})"
+    ]
+    if errs:
+        parts.append("⚠ " + " · ".join(errs))
+    if oversized:
+        parts.append("⚠ oversize: " + " · ".join(oversized))
+    if len(paths) and not errs and not oversized:
+        parts.append("✓ all files within limits")
+    return "\n\n".join(parts)
 
 
 def _fmt_time(sec):
@@ -159,16 +198,33 @@ def fetch_timeline(job_id):
 
 
 def call_backend(files, preset_label, duration, use_library, mix_mode_label,
+                 mode_choice, vocals_choice,
                  advanced_on, custom_prompt, custom_arc, seed, lufs_label,
                  oauth_profile: gr.OAuthProfile | None = None,
                  progress=gr.Progress()):
+    # Always clear stale outputs on error so prior render's plot/table doesn't linger.
+    EMPTY = (None, "", None, [])
     progress(0.02, desc="validating")
     if not MI300X_URL or not MI300X_KEY:
-        return None, "Backend not configured.", None, []
+        return None, "**Error:** backend not configured.", None, []
     if not files:
-        return None, f"Upload {MIN_CLIPS}–{MAX_CLIPS} audio clips.", None, []
+        return (None, f"**Error:** upload {MIN_CLIPS}–{MAX_CLIPS} audio clips.",
+                None, [])
     if not (MIN_CLIPS <= len(files) <= MAX_CLIPS):
-        return None, f"Need {MIN_CLIPS}–{MAX_CLIPS} clips, got {len(files)}.", None, []
+        return (None,
+                f"**Error:** need {MIN_CLIPS}–{MAX_CLIPS} clips, got {len(files)}.",
+                None, [])
+    errs, oversized = _validate_uploads(files)
+    if errs:
+        return (None, "**Error:** invalid uploads:\n\n- " + "\n- ".join(errs),
+                None, [])
+    if oversized:
+        return (None,
+                f"**Error:** files exceed {MAX_FILE_MB} MB cap:\n\n- "
+                + "\n- ".join(oversized)
+                + f"\n\n_Re-export at lower bitrate or trim length. "
+                f"WAV at 44.1kHz stereo ≈ 10MB/min._",
+                None, [])
 
     slug = PRESETS[preset_label][0]
     multipart = []
@@ -182,11 +238,14 @@ def call_backend(files, preset_label, duration, use_library, mix_mode_label,
         mix_mode_resolved = "balanced"
     data = {
         "preset": slug,
+        "style": slug,
         "duration": str(int(duration)),
         "mix_mode": mix_mode_resolved,
         "use_library": "true" if use_library else "false",
         "lufs": str(LUFS_OPTIONS.get(lufs_label, -9)),
         "export_format": "mp3",
+        "mode": (mode_choice or "dj_set").lower(),
+        "vocals": (vocals_choice or "on").lower(),
     }
     if advanced_on:
         if custom_prompt and custom_prompt.strip():
@@ -207,13 +266,24 @@ def call_backend(files, preset_label, duration, use_library, mix_mode_label,
         r = requests.post(f"{MI300X_URL}/generate", data=data, files=multipart,
                           headers=headers, timeout=BACKEND_TIMEOUT_SEC)
     except requests.exceptions.RequestException as e:
-        return None, f"Backend unreachable: {e}", None, []
+        return None, f"**Error:** backend unreachable. _{e}_", None, []
     if r.status_code == 503:
-        return None, "Server busy — retry in ~2 min.", None, []
+        return None, "**Server busy** — retry in ~2 min.", None, []
     if r.status_code == 504:
-        return None, f"Job exceeded ~{BACKEND_TIMEOUT_SEC // 60} min.", None, []
+        return (None,
+                f"**Job timed out** (>{BACKEND_TIMEOUT_SEC // 60} min). "
+                f"Try shorter mix length or fewer clips.",
+                None, [])
+    if r.status_code == 401:
+        return None, "**Auth failed** — backend key mismatch.", None, []
+    if r.status_code == 400:
+        try:
+            detail = r.json().get("detail", r.text[:300])
+        except Exception:
+            detail = r.text[:300]
+        return None, f"**Validation error 400:** {detail}", None, []
     if r.status_code != 200:
-        return None, f"Error {r.status_code}: {r.text[:300]}", None, []
+        return None, f"**Error {r.status_code}:** {r.text[:300]}", None, []
 
     progress(0.92, desc="rendering")
     job_ref = r.headers.get("X-Job-Id", "")
@@ -348,9 +418,20 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
                 duration_info = gr.Markdown(
                     f"_0 clips · upload to compute pool stats_")
 
-                gr.Markdown("### 2 · Vibe")
+                gr.Markdown("### 2 · Output style")
+                with gr.Row():
+                    mode_choice = gr.Radio(
+                        choices=["mashup", "dj_set"],
+                        value="dj_set", label="mode",
+                        info="mashup: polished smooth · dj_set: festival peaks + accents")
+                    vocals_choice = gr.Radio(
+                        choices=["on", "off"],
+                        value="on", label="vocals",
+                        info="on: full mix · off: instrumental")
+
+                gr.Markdown("### 3 · Vibe")
                 preset = gr.Dropdown(list(PRESETS), value="Festival Inferno",
-                                     label="preset")
+                                     label="style preset")
                 with gr.Row():
                     lufs = gr.Dropdown(list(LUFS_OPTIONS), value="club (-9)",
                                        label="loudness")
@@ -359,7 +440,7 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
                         value=120, step=5,
                         label="length (seconds)")
 
-                gr.Markdown("### 3 · Library blend")
+                gr.Markdown("### 4 · Library blend")
                 with gr.Row():
                     use_library = gr.Checkbox(
                         value=False, label="use sample library")
@@ -406,6 +487,7 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
 
         generate.click(call_backend,
                        [files, preset, duration, use_library, mix_mode,
+                        mode_choice, vocals_choice,
                         advanced_on, custom_prompt, custom_arc, seed, lufs],
                        [out_audio, summary, timeline_plot, segments_df],
                        concurrency_id="gpu_job", concurrency_limit=4)
