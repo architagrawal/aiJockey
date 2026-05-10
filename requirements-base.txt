@@ -20,3 +20,9 @@ tqdm
 yt-dlp>=2024.1.0
 beautifulsoup4>=4.12.0
 gradio>=4.0.0
+
+# Audiobox Aesthetics (Meta) — reference-free music quality scorer.
+# 4 axes: Production Quality / Complexity / Content Enjoyment / Usefulness.
+# Tier 1 C from NEXT.TXT. Wrapper in src/audiobox_aesthetics.py degrades
+# silently when absent.
+audiobox-aesthetics>=0.0.4
