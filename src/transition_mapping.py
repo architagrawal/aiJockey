@@ -70,8 +70,12 @@ def tier_to_technique(tier: str, junction_idx: int) -> dict[str, Any]:
         "cut": CUT_TECHNIQUES,
         "loop": LOOP_TECHNIQUES,
     }[t]
-    base = pool[junction_idx % len(pool)]
-    return dict(base)
+    base = dict(pool[junction_idx % len(pool)])
+    # Propagate tier into the technique dict so downstream
+    # (constitutional validator, debug logs, RAG features) can see
+    # what the LLM intended, not just the resolved DSP name.
+    base["tier"] = t
+    return base
 
 
 ALLOWLIST_NAMES = frozenset(

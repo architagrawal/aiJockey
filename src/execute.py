@@ -59,6 +59,39 @@ def _phrase_bars_for_clip(meta: dict) -> int:
     return int(meta.get('phrase_bars', 8))
 
 
+def enforce_min_segment_length(timeline: list[dict],
+                                clips_meta: dict[str, dict],
+                                min_bars: int = 16) -> list[dict]:
+    """Extend any segment shorter than min_bars (at clip BPM) by walking
+    forward in the clip via downbeats. Prevents 0.5-2s segments that get
+    fully consumed by overlap windows (STATUS bug #1 root cause).
+    """
+    for entry in timeline:
+        cid = entry.get('clip_id')
+        seg = entry.get('segment') or {}
+        meta = clips_meta.get(cid) or {}
+        if 'start' not in seg or 'end' not in seg:
+            continue
+        bpm = float(meta.get('tempo', 120.0)) or 120.0
+        bar_dur = 4.0 * 60.0 / bpm
+        target_min = min_bars * bar_dur
+        cur_len = float(seg['end']) - float(seg['start'])
+        if cur_len >= target_min:
+            continue
+        clip_dur = float(meta.get('duration', seg['end']))
+        new_end = min(clip_dur, float(seg['start']) + target_min)
+        downbeats = meta.get('downbeats') or []
+        if downbeats:
+            try:
+                new_end = snap_to_phrase(new_end, downbeats, bars_per_phrase=4)
+            except Exception:
+                pass
+        if new_end > float(seg['start']):
+            seg['end'] = new_end
+            seg['min_length_extended'] = True
+    return timeline
+
+
 def quantize_timeline_to_phrase(timeline: list[dict],
                                 clips_meta: dict[str, dict],
                                 max_drift_bars: int = 2) -> list[dict]:
@@ -619,6 +652,16 @@ def execute(timeline_path: str, cache_dir: str, out_path: str,
     # Phrase-quantize segment boundaries so junctions land on real phrase 1.
     # Disable with AIJOCKEY_PHRASE_QUANTIZE=0 if A/B testing.
     import os
+    # Enforce minimum segment length BEFORE phrase quantize. Stops short
+    # segments (0.5-2s) from being fully consumed by overlap windows —
+    # the root of STATUS bug #1 'render duration shortfall'.
+    min_bars = int(os.getenv('AIJOCKEY_MIN_SEGMENT_BARS', '16'))
+    before_lens = [e['segment'].get('end', 0) - e['segment'].get('start', 0) for e in tl]
+    enforce_min_segment_length(tl, clips_meta, min_bars=min_bars)
+    extended = sum(1 for e in tl if e.get('segment', {}).get('min_length_extended'))
+    if extended:
+        print(f"min-length: extended {extended}/{len(tl)} short segments to >= {min_bars} bars")
+
     if os.getenv('AIJOCKEY_PHRASE_QUANTIZE', '1') != '0':
         before = [(e['segment'].get('start'), e['segment'].get('end')) for e in tl]
         quantize_timeline_to_phrase(tl, clips_meta, max_drift_bars=2)
