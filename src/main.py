@@ -117,6 +117,7 @@ def cmd_plan(args: argparse.Namespace) -> None:
         callback_budget=callback_final,
         max_clips=args.max_clips,
         min_unique_clips=getattr(args, 'min_unique_clips', 5),
+        clip_reuse_cooldown=getattr(args, 'reuse_cooldown', 5),
         arc_shape=arc_final,
         style_rag_dir=args.style_rag,
         classifier_ckpt=args.classifier,
@@ -401,6 +402,7 @@ def cmd_all(args: argparse.Namespace) -> None:
         callback_budget=callback_final,
         max_clips=args.max_clips,
         min_unique_clips=getattr(args, 'min_unique_clips', 5),
+        clip_reuse_cooldown=getattr(args, 'reuse_cooldown', 5),
         arc_shape=arc_final,
         style_rag_dir=args.style_rag,
         classifier_ckpt=args.classifier,
@@ -458,6 +460,9 @@ def main() -> None:
     p.add_argument('--duration', type=float, default=1800.0)
     p.add_argument('--surprises', type=int, default=10)
     p.add_argument('--callbacks', type=int, default=1)
+    p.add_argument('--reuse_cooldown', type=int, default=5,
+                   help='Min entries between reuses of same clip. Lower = '
+                        'more A-B-A revisits allowed.')
     p.add_argument('--max_clips', type=int, default=200)
     p.add_argument('--min_unique_clips', type=int, default=5,
                    help='min distinct clips that must appear in mix')
@@ -519,6 +524,9 @@ def main() -> None:
     p.add_argument('--duration', type=float, default=1800.0)
     p.add_argument('--surprises', type=int, default=10)
     p.add_argument('--callbacks', type=int, default=1)
+    p.add_argument('--reuse_cooldown', type=int, default=5,
+                   help='Min entries between reuses of same clip. Lower = '
+                        'more A-B-A revisits allowed.')
     p.add_argument('--max_clips', type=int, default=200)
     p.add_argument('--min_unique_clips', type=int, default=5,
                    help='min distinct clips that must appear in mix')
