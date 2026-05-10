@@ -141,7 +141,24 @@ def cmd_plan(args: argparse.Namespace) -> None:
         if accents:
             attach_accent_hints(tl, accents)
             print(f"[director] attached {len(accents)} accent hints")
-    save_timeline(tl, args.out)
+    # Stamp meta so cmd_execute + probe_log can recover prompt/arc/mix_mode
+    # (was showing "unknown" in by_arc/by_mode summarize buckets).
+    plan_meta = {
+        'prompt': getattr(args, 'prompt', None),
+        'arc': arc_final,
+        'mix_mode': getattr(args, 'mix_mode', None),
+        'target_duration': getattr(args, 'duration', None),
+        'director_used': director_out is not None,
+        'director_fallback': bool((director_out or {}).get('_fallback')),
+        'director': {
+            'arc': (director_out or {}).get('arc'),
+            'set_narrative': (director_out or {}).get('set_narrative'),
+            'transition_tiers': (director_out or {}).get('transition_tiers'),
+            'transition_intents': (director_out or {}).get('transition_intents'),
+            '_fallback': (director_out or {}).get('_fallback'),
+        } if director_out else None,
+    }
+    save_timeline(tl, args.out, meta=plan_meta)
     print(f"wrote {args.out} ({len(tl)} entries)")
 
 

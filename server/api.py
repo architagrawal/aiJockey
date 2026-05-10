@@ -1087,6 +1087,26 @@ async def generate(
                              verdict=probe["verdict"],
                              severity=probe["overall_severity"])
 
+                        # CriticV2 advisory score header — works without
+                        # checkpoint (returns None gracefully). Adds a
+                        # second-opinion signal beyond probes; consumers
+                        # may threshold-gate on a combined rule.
+                        try:
+                            import sys as _ss
+                            _ss.path.insert(0, str(Path(__file__).resolve()
+                                                    .parents[1] / "src"))
+                            from critic_v2_score import score as _critic_score
+                            cs_t0 = time.perf_counter()
+                            cs = _critic_score(wav_for_probe)
+                            cs_ms = int((time.perf_counter() - cs_t0) * 1000)
+                            if cs is not None:
+                                headers["X-Critic"] = json.dumps(
+                                    {"score": round(float(cs), 3),
+                                     "ms": cs_ms})[:200]
+                                jlog(job_id, "critic", cs_ms, score=cs)
+                        except Exception as _e:
+                            jlog(job_id, "critic_skip", 0, err=str(_e)[:200])
+
                         # Per-render probe log → DPO data accumulator.
                         # Atomic JSONL append at $AIJOCKEY_PROBE_LOG (default
                         # /scratch/probes/log.jsonl). Captures Director plan,
