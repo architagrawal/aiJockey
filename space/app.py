@@ -159,6 +159,84 @@ def render_timeline_plot(timeline_json):
     return fig
 
 
+def _decode_for_waveform(mp3_path: str, sr: int = 8000):
+    """Decode audio to mono numpy at low sample rate via ffmpeg."""
+    import subprocess
+    import numpy as np
+    wav_path = mp3_path + ".wf.wav"
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", mp3_path, "-ac", "1", "-ar", str(sr),
+             "-loglevel", "error", wav_path],
+            check=True, capture_output=True, timeout=30)
+        import soundfile as sf
+        data, real_sr = sf.read(wav_path, dtype="float32")
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        return data, int(real_sr)
+    except Exception:
+        return None, None
+
+
+def render_colored_waveform(audio_path: str, timeline_json):
+    """Decoded mono envelope, fill_between per-segment with source color."""
+    import numpy as np
+    samples, sr = _decode_for_waveform(audio_path)
+    if samples is None or sr is None:
+        return None
+    n_target = 3000
+    if len(samples) > n_target:
+        bin_size = len(samples) // n_target
+        env = np.abs(samples[:bin_size * n_target]).reshape(
+            n_target, bin_size).max(axis=1)
+    else:
+        env = np.abs(samples)
+    dur_sec = len(samples) / float(sr)
+    t = np.linspace(0, dur_sec, len(env))
+
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(10, 2.4), dpi=120)
+    fig.patch.set_facecolor("#0f172a")
+    ax.set_facecolor("#0f172a")
+
+    segments = (timeline_json or {}).get("segments") or []
+    user_color, idx = {}, 0
+    cursor = 0.0
+    span_colors = []
+    for seg in segments:
+        d = float(seg["duration_sec"])
+        src = seg.get("source") or "?"
+        lbl = seg.get("label") or "library"
+        if src == "user":
+            if lbl not in user_color:
+                user_color[lbl] = USER_PALETTE[idx % len(USER_PALETTE)]
+                idx += 1
+            color = user_color[lbl]
+        else:
+            color = LIBRARY_COLOR
+        span_colors.append((cursor, cursor + d, color))
+        cursor += d
+
+    if span_colors:
+        for s, e, c in span_colors:
+            mask = (t >= s) & (t <= e)
+            if mask.any():
+                ax.fill_between(t[mask], -env[mask], env[mask],
+                                color=c, linewidth=0)
+    else:
+        ax.fill_between(t, -env, env, color="#ff2d6f", linewidth=0)
+
+    ax.set_xlim(0, dur_sec)
+    ax.set_ylim(-1.05, 1.05)
+    ax.set_yticks([])
+    ax.set_xlabel("seconds", color="#94a3b8", fontsize=9)
+    ax.tick_params(axis="x", colors="#94a3b8", labelsize=9)
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    plt.tight_layout()
+    return fig
+
+
 def render_audiobox_plot(audiobox_json):
     """Matplotlib horizontal bar chart of 4 Audiobox aesthetics axes (0-10)."""
     if not audiobox_json:
@@ -236,21 +314,25 @@ def _shorten_sample_name(stem: str) -> str:
     return s[:60]
 
 
-def fetch_sample_clips() -> list[tuple[str, str]]:
+def fetch_sample_clips() -> dict:
     """Return [(label, id)] of pre-staged clips on droplet.
 
     Test-clips origin gets a [research only] suffix so users / judges
     can distinguish copyrighted reference material from cleared user_set.
     """
+    EMPTY = {"vocal": [], "instrumental": []}
     if not (MI300X_URL and MI300X_KEY):
-        return []
+        return EMPTY
     try:
         r = requests.get(f"{MI300X_URL}/sample_clips",
                          headers={"X-Key": MI300X_KEY}, timeout=8)
         if not r.ok:
-            return []
+            return EMPTY
         clips = r.json().get("clips", [])
-        out = []
+        # Split into vocal-heavy (user_set + test_clips) and instrumental
+        # (curated_ia). Returns dict so caller can render two CheckboxGroups.
+        vocal: list[tuple[str, str]] = []
+        instr: list[tuple[str, str]] = []
         for c in clips:
             origin = c.get("origin", "")
             if origin == "test_clips":
@@ -259,12 +341,17 @@ def fetch_sample_clips() -> list[tuple[str, str]]:
                 tag = " [Internet Archive · CC]"
             else:
                 tag = ""
+            dur = float(c.get("duration_sec", 0))
+            mins = int(dur // 60)
+            secs = int(dur - 60 * mins)
+            mmss = f"{mins}:{secs:02d}"
             label = (f"{_shorten_sample_name(c['name'])} "
-                     f"({c['duration_sec']:.0f}s, {c['size_mb']:.1f} MB){tag}")
-            out.append((label, c["id"]))
-        return out
+                     f"({mmss} · {c['size_mb']:.1f} MB){tag}")
+            (instr if origin == "curated_ia" else vocal).append(
+                (label, c["id"]))
+        return {"vocal": vocal, "instrumental": instr}
     except Exception:
-        return []
+        return {"vocal": [], "instrumental": []}
 
 
 def fetch_timeline(job_id):
@@ -280,16 +367,18 @@ def fetch_timeline(job_id):
     return None
 
 
-def call_backend(files, sample_picks, preset_label, duration, use_library,
-                 mix_mode_label, mode_choice, vocals_choice,
+def call_backend(files, picks_vocal, picks_instr, preset_label, duration,
+                 use_library, mix_mode_label, mode_choice, vocals_choice,
                  advanced_on, custom_prompt, custom_arc, seed, lufs_label,
                  oauth_profile: gr.OAuthProfile | None = None,
                  progress=gr.Progress()):
+    # Merge both sample pools into one ID list. Backend accepts CSV.
+    sample_picks = list(picks_vocal or []) + list(picks_instr or [])
     # Always clear stale outputs on error so prior render's plot/table doesn't linger.
-    EMPTY = (None, "", None, [], None)
+    EMPTY = (None, "", None, None, [], None)
     progress(0.02, desc="validating")
     if not MI300X_URL or not MI300X_KEY:
-        return None, "**Error:** backend not configured.", None, [], None
+        return None, "**Error:** backend not configured.", None, None, [], None
     sample_ids = list(sample_picks or [])
     n_uploads = len(files or [])
     n_total = n_uploads + len(sample_ids)
@@ -297,23 +386,35 @@ def call_backend(files, sample_picks, preset_label, duration, use_library,
         return (None,
                 f"**Error:** upload {MIN_CLIPS}–{MAX_CLIPS} clips OR pick "
                 f"sample clips from the dropdown.",
-                None, [], None)
+                None, None, [], None)
+    samples_only = (n_uploads == 0 and len(sample_ids) > 0)
+    if samples_only:
+        if len(sample_ids) < 6:
+            return (None,
+                    f"**Error:** with samples-only, pick at least "
+                    f"**6 clips** (got {len(sample_ids)}).",
+                    None, None, [], None)
+        if int(duration) < 180:
+            return (None,
+                    f"**Error:** with samples-only, mix length must be "
+                    f"≥ **3:00** (180s). Current: {int(duration)}s.",
+                    None, None, [], None)
     if not (MIN_CLIPS <= n_total <= MAX_CLIPS):
         return (None,
                 f"**Error:** need {MIN_CLIPS}–{MAX_CLIPS} clips total "
                 f"(have {n_uploads} upload + {len(sample_ids)} sample).",
-                None, [], None)
+                None, None, [], None)
     errs, oversized = _validate_uploads(files)
     if errs:
         return (None, "**Error:** invalid uploads:\n\n- " + "\n- ".join(errs),
-                None, [], None)
+                None, None, [], None)
     if oversized:
         return (None,
                 f"**Error:** files exceed {MAX_FILE_MB} MB cap:\n\n- "
                 + "\n- ".join(oversized)
                 + f"\n\n_Re-export at lower bitrate or trim length. "
                 f"WAV at 44.1kHz stereo ≈ 10MB/min._",
-                None, [], None)
+                None, None, [], None)
 
     slug = PRESETS[preset_label][0]
     multipart = []
@@ -361,18 +462,55 @@ def call_backend(files, sample_picks, preset_label, duration, use_library,
     if oauth_profile is not None:
         headers["X-User-Id"] = str(getattr(oauth_profile, "username", "anon"))[:64]
     progress(0.10, desc="uploading clips to GPU")
+    # Progress ticker: spin background thread that updates progress bar with
+    # rotating stage labels + real elapsed seconds while the blocking POST
+    # is in flight. User sees activity instead of stuck-at-10%.
+    import threading as _th
+    import time as _t
+    _done = _th.Event()
+    _stages = [
+        (0.12, "uploading + decoding"),
+        (0.20, "demucs stem separation"),
+        (0.32, "beat + key analysis"),
+        (0.42, "CLAP semantic embedding"),
+        (0.52, "Director LLM planning"),
+        (0.62, "beam search timeline"),
+        (0.72, "executing transitions"),
+        (0.82, "phrase + stem alignment"),
+        (0.88, "mastering + LUFS norm"),
+    ]
+    _est_sec = max(45.0, int(duration) * 0.55)
+    _t0 = _t.time()
+    def _tick():
+        while not _done.is_set():
+            elapsed = _t.time() - _t0
+            frac = min(0.90, 0.10 + (elapsed / _est_sec) * 0.78)
+            label = "rendering"
+            for f, lbl in _stages:
+                if frac >= f:
+                    label = lbl
+            try:
+                progress(frac, desc=f"{label} · {int(elapsed)}s")
+            except Exception:
+                pass
+            if _done.wait(2.5):
+                break
+    _ticker = _th.Thread(target=_tick, daemon=True)
+    _ticker.start()
     try:
         r = requests.post(f"{MI300X_URL}/generate", data=data, files=multipart,
                           headers=headers, timeout=BACKEND_TIMEOUT_SEC)
     except requests.exceptions.RequestException as e:
-        return None, f"**Error:** backend unreachable. _{e}_", None, [], None
+        _done.set()
+        return None, f"**Error:** backend unreachable. _{e}_", None, None, [], None
+    _done.set()  # stop ticker now that POST returned
     if r.status_code == 503:
-        return None, "**Server busy** — retry in ~2 min.", None, [], None
+        return None, "**Server busy** — retry in ~2 min.", None, None, [], None
     if r.status_code == 504:
         return (None,
                 f"**Job timed out** (>{BACKEND_TIMEOUT_SEC // 60} min). "
                 f"Try shorter mix length or fewer clips.",
-                None, [], None)
+                None, None, [], None)
     if r.status_code == 401:
         try:
             detail = r.json().get("detail", "")
@@ -380,21 +518,21 @@ def call_backend(files, sample_picks, preset_label, duration, use_library,
             detail = ""
         return (None,
                 f"🔒 **Sign-in required.** {detail}".strip(),
-                None, [], None)
+                None, None, [], None)
     if r.status_code == 429:
         try:
             detail = r.json().get("detail", "Daily limit reached.")
         except Exception:
             detail = "Daily limit reached."
-        return None, f"⏳ **{detail}**", None, [], None
+        return None, f"⏳ **{detail}**", None, None, [], None
     if r.status_code == 400:
         try:
             detail = r.json().get("detail", r.text[:300])
         except Exception:
             detail = r.text[:300]
-        return None, f"**Validation error 400:** {detail}", None, [], None
+        return None, f"**Validation error 400:** {detail}", None, None, [], None
     if r.status_code != 200:
-        return None, f"**Error {r.status_code}:** {r.text[:300]}", None, [], None
+        return None, f"**Error {r.status_code}:** {r.text[:300]}", None, None, [], None
 
     progress(0.92, desc="rendering")
     job_ref = r.headers.get("X-Job-Id", "")
@@ -444,7 +582,8 @@ def call_backend(files, sample_picks, preset_label, duration, use_library,
     except Exception:
         pass
     audiobox_fig = render_audiobox_plot(audiobox_json)
-    return out.name, summary_md, plot, rows, audiobox_fig
+    waveform_fig = render_colored_waveform(out.name, timeline_json)
+    return (out.name, summary_md, waveform_fig, plot, rows, audiobox_fig)
 
 
 def backend_status_md():
@@ -473,6 +612,13 @@ CSS = """
     font-family: 'JetBrains Mono', monospace !important;
     font-size: 12px !important;
 }
+/* Sample-clip CheckboxGroup: scrollable inside its own panel so the page
+   stays anchored. Targets the inner wrap-block of the component. */
+.aij-pool-scroll {max-height: 260px; overflow-y: auto !important;}
+.aij-pool-scroll .wrap, .aij-pool-scroll > div {
+    max-height: 260px !important; overflow-y: auto !important;
+}
+.aij-pick-hint {color: #94a3b8 !important; font-size: 12px !important;}
 """
 
 THEME = gr.themes.Base(
@@ -588,16 +734,36 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
                                 label=f"upload {MIN_CLIPS}–{MAX_CLIPS} audio files (≤75 MB each)")
                 duration_info = gr.Markdown(
                     f"_0 clips · upload to compute pool stats_")
-                sample_picks = gr.CheckboxGroup(
-                    choices=fetch_sample_clips(),
-                    label="OR pick from droplet sample clips (skip upload)",
-                    info="Server-side files in /workspace/user_set/. "
-                         "Faster than uploading WAVs.")
-                refresh_samples = gr.Button("refresh sample list", size="sm",
-                                             variant="secondary")
+                _initial_pools = fetch_sample_clips()
+                gr.Markdown(
+                    "**OR pick from droplet sample clips** (skip upload). "
+                    "Mix freely from both pools. Lists are scrollable.",
+                    elem_classes="aij-pick-hint")
+                with gr.Accordion(
+                        "vocal-heavy clips (Despacito, Taki Taki, "
+                        "All The Stars, Waka Waka, test1, test2)",
+                        open=True):
+                    sample_picks_vocal = gr.CheckboxGroup(
+                        choices=_initial_pools["vocal"],
+                        label="",
+                        elem_classes="aij-pool-scroll")
+                with gr.Accordion(
+                        "instrumental clips · 40 from Internet Archive · CC",
+                        open=False):
+                    sample_picks_instr = gr.CheckboxGroup(
+                        choices=_initial_pools["instrumental"],
+                        label="",
+                        elem_classes="aij-pool-scroll")
+                refresh_samples = gr.Button(
+                    "refresh sample list", size="sm", variant="secondary")
+
+                def _refresh():
+                    p = fetch_sample_clips()
+                    return (gr.update(choices=p["vocal"]),
+                            gr.update(choices=p["instrumental"]))
                 refresh_samples.click(
-                    lambda: gr.update(choices=fetch_sample_clips()),
-                    None, sample_picks)
+                    _refresh, None,
+                    [sample_picks_vocal, sample_picks_instr])
 
                 gr.Markdown("### 2 · Output style")
                 with gr.Row():
@@ -655,11 +821,12 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
                 out_audio = gr.Audio(label="mastered mix", autoplay=True,
                                      type="filepath",
                                      show_download_button=True,
-                                     interactive=False,
-                                     waveform_options={"waveform_color": "#ff2d6f",
-                                                       "waveform_progress_color": "#22d3ee"})
+                                     interactive=False)
                 summary = gr.Markdown(
                     "_Output, quality scores, and timeline appear here after render._")
+
+                gr.Markdown("### Waveform (color = source clip)")
+                colored_waveform = gr.Plot(label="")
 
                 gr.Markdown("### Source-attributed timeline")
                 timeline_plot = gr.Plot(label="segments")
@@ -673,17 +840,19 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
                 audiobox_plot = gr.Plot(label="4-axis quality score")
 
         generate.click(call_backend,
-                       [files, sample_picks, preset, duration, use_library,
+                       [files, sample_picks_vocal, sample_picks_instr,
+                        preset, duration, use_library,
                         mix_mode, mode_choice, vocals_choice,
                         advanced_on, custom_prompt, custom_arc, seed, lufs],
-                       [out_audio, summary, timeline_plot, segments_df,
-                        audiobox_plot],
+                       [out_audio, summary, colored_waveform,
+                        timeline_plot, segments_df, audiobox_plot],
                        concurrency_id="gpu_job", concurrency_limit=4)
 
         def _load_demo_preset():
             """One-click demo: pick first 4 sample clips + dj_set +
             tomorrowland + festival_inferno + 180s + library balanced."""
-            ids = [cid for _, cid in fetch_sample_clips()][:4]
+            pools = fetch_sample_clips()
+            ids = [cid for _, cid in pools["vocal"]][:4]
             return (
                 gr.update(value=ids),                       # sample_picks
                 gr.update(value="Festival Inferno"),        # preset
@@ -697,7 +866,7 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
             )
         load_demo.click(
             _load_demo_preset, None,
-            [sample_picks, preset, duration, use_library, mix_mode,
+            [sample_picks_vocal, preset, duration, use_library, mix_mode,
              mode_choice, vocals_choice, advanced_on, custom_arc])
 
         # Sign-in surfacing + form gating + quota check.
