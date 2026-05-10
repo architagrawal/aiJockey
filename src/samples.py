@@ -30,6 +30,11 @@ PHASE1_ALLOWED_TYPES = frozenset({
     'snare_rolls',
     'hihat_rolls',
     'sub_drops',
+    # Meme / character FX — gated to Phase 1 too so Director can pick them
+    # for festival moments (per dj_research §11 — vocal/airhorn/spinback
+    # accents are core DJ vocabulary).
+    'airhorns',
+    'vinyl',
 })
 
 
