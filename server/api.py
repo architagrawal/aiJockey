@@ -730,17 +730,21 @@ def ready():
     return {"status": "ready", "disk_free_gb": disk_free_gb()}
 
 
-# Multiple sample-clip pools. Each entry: (directory, origin_tag).
-SAMPLE_CLIPS_DIRS: list[tuple[Path, str]] = [
-    (ROOT / "user_set", "user_set"),
-    (ROOT / "test_user_clips", "test_clips"),
+# Multiple sample-clip pools. Each entry: (directory, origin_tag, max_clips).
+# `max_clips=0` = no cap. Path-traversal guards iterate same list.
+SAMPLE_CLIPS_DIRS: list[tuple[Path, str, int]] = [
+    (ROOT / "user_set", "user_set", 0),
+    (ROOT / "test_user_clips", "test_clips", 0),
+    # Internet Archive curated mp3s (200+). UI cap via env knob.
+    (Path("/scratch/raw/ia"), "curated_ia",
+     int(os.environ.get("AIJOCKEY_CURATED_CAP", "40"))),
 ]
 SAMPLE_CLIPS_DIR = SAMPLE_CLIPS_DIRS[0][0]  # legacy alias
 
 
 def _resolve_sample_clip(cid: str) -> Path | None:
     """Locate a sample clip across SAMPLE_CLIPS_DIRS w/ traversal guard."""
-    for d, _origin in SAMPLE_CLIPS_DIRS:
+    for d, _origin, _cap in SAMPLE_CLIPS_DIRS:
         if not d.exists():
             continue
         p = d / cid
@@ -759,9 +763,10 @@ def _resolve_sample_clip(cid: str) -> Path | None:
 def list_sample_clips():
     """Return pre-staged user clips on the droplet."""
     out = []
-    for d, origin in SAMPLE_CLIPS_DIRS:
+    for d, origin, cap in SAMPLE_CLIPS_DIRS:
         if not d.exists():
             continue
+        added_from_dir = 0
         for p in sorted(d.iterdir()):
             if p.suffix.lower() not in ALLOWED_EXTS:
                 continue
@@ -774,7 +779,10 @@ def list_sample_clips():
                         "size_mb": round(sz / 1024 / 1024, 1),
                         "duration_sec": round(dur, 1),
                         "origin": origin})
-    return {"clips": out, "dirs": [str(d) for d, _ in SAMPLE_CLIPS_DIRS]}
+            added_from_dir += 1
+            if cap and added_from_dir >= cap:
+                break
+    return {"clips": out, "dirs": [str(d) for d, _, _ in SAMPLE_CLIPS_DIRS]}
 
 
 @app.get("/quota")

@@ -252,7 +252,13 @@ def fetch_sample_clips() -> list[tuple[str, str]]:
         clips = r.json().get("clips", [])
         out = []
         for c in clips:
-            tag = " [research only]" if c.get("origin") == "test_clips" else ""
+            origin = c.get("origin", "")
+            if origin == "test_clips":
+                tag = " [research only]"
+            elif origin == "curated_ia":
+                tag = " [Internet Archive · CC]"
+            else:
+                tag = ""
             label = (f"{_shorten_sample_name(c['name'])} "
                      f"({c['duration_sec']:.0f}s, {c['size_mb']:.1f} MB){tag}")
             out.append((label, c["id"]))
