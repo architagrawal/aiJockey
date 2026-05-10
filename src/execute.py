@@ -11,6 +11,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import torch
 import torchaudio
@@ -22,6 +25,24 @@ from phrase import snap_to_phrase
 from samples import SampleBank
 
 SR = 44100
+
+# Perf: pre-load CPU thread budget for stem-parallel rubberband + I/O.
+# pyrubberband shells out to the rubberband CLI which is single-threaded
+# per invocation but releases the GIL — N independent stems can run
+# concurrently. cap at 4 (= stem count) to avoid oversubscription.
+_STEM_WORKERS = max(1, min(4, int(os.environ.get('AIJOCKEY_STEM_WORKERS', '4'))))
+# Allow rendering multiple timeline segments concurrently. Each segment
+# allocates ~200MB of PCM at 600s/2ch/float32; default 2 keeps peak RSS
+# bounded while doubling render throughput vs serial.
+_RENDER_WORKERS = max(1, min(8, int(os.environ.get('AIJOCKEY_RENDER_WORKERS', '2'))))
+
+# CUDA/ROCm autotuner: lets cuDNN/MIOpen pick fastest conv algos for the
+# fixed input shapes seen in this pipeline. Idempotent + harmless on CPU.
+try:
+    torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision('high')
+except Exception:
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -79,25 +100,81 @@ def quantize_timeline_to_phrase(timeline: list[dict],
 # Stem loading
 # ---------------------------------------------------------------------------
 
+def _load_one_stem(fp: Path) -> np.ndarray | None:
+    if not fp.exists():
+        return None
+    wav, sr = torchaudio.load(str(fp))
+    if sr != SR:
+        wav = torchaudio.functional.resample(wav, sr, SR)
+    if wav.size(0) == 1:
+        wav = wav.repeat(2, 1)
+    return wav.numpy().astype(np.float32)
+
+
 def load_stems(clip_id: str, cache_dir: str = 'cache') -> dict[str, np.ndarray]:
     base = Path(cache_dir) / 'stems' / clip_id
-    out: dict[str, np.ndarray] = {}
-    for name in ('drums', 'bass', 'other', 'vocals'):
-        fp = base / f'{name}.wav'
-        if not fp.exists():
-            continue
-        wav, sr = torchaudio.load(str(fp))
-        if sr != SR:
-            wav = torchaudio.functional.resample(wav, sr, SR)
-        if wav.size(0) == 1:
-            wav = wav.repeat(2, 1)
-        out[name] = wav.numpy().astype(np.float32)
-    return out
+    names = ('drums', 'bass', 'other', 'vocals')
+    paths = [base / f'{n}.wav' for n in names]
+    # Parallel I/O — torchaudio.load + resample releases the GIL.
+    with ThreadPoolExecutor(max_workers=_STEM_WORKERS) as ex:
+        arrs = list(ex.map(_load_one_stem, paths))
+    return {n: a for n, a in zip(names, arrs) if a is not None}
 
 
 # ---------------------------------------------------------------------------
 # Time-stretch + pitch shift
 # ---------------------------------------------------------------------------
+
+_RB_BIN = os.environ.get('AIJOCKEY_RUBBERBAND_BIN', 'rubberband')
+
+
+def _rubberband_combined(x: np.ndarray, sr: int, rate: float,
+                          semitones: float) -> np.ndarray:
+    """Run rubberband CLI ONCE with both --tempo and --pitch flags.
+
+    pyrubberband's `time_stretch` + `pitch_shift` invokes the binary
+    twice (two subprocess spawns + four tempfile WAV reads/writes).
+    Calling rubberband directly with both flags cuts that overhead in
+    half and avoids one resample-quality round-trip through the WAV
+    container.
+
+    Falls back to the two-pass pyrubberband path on any failure so the
+    behavior degrades to current performance, never below.
+    """
+    import subprocess
+    import tempfile
+    import soundfile as sf
+
+    in_fd, in_path = tempfile.mkstemp(prefix='rb_in_', suffix='.wav')
+    out_fd, out_path = tempfile.mkstemp(prefix='rb_out_', suffix='.wav')
+    os.close(in_fd)
+    os.close(out_fd)
+    try:
+        sf.write(in_path, x, sr, subtype='FLOAT')
+        cmd = [_RB_BIN, '-q']
+        if abs(rate - 1.0) > 1e-4:
+            # rubberband interprets --tempo as OUTPUT_TEMPO/INPUT_TEMPO,
+            # which equals (dst_bpm/src_bpm) — same as the rate we already
+            # computed. NB: pyrubberband.time_stretch calls this 'rate'.
+            cmd += ['--tempo', f'{rate:.6f}']
+        if abs(semitones) > 1e-4:
+            cmd += ['--pitch', f'{semitones:.6f}']
+        if len(cmd) == 2:
+            # No-op → just return input (avoids a useless rubberband pass).
+            return x
+        cmd += [in_path, out_path]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            raise RuntimeError(f'rubberband exit {r.returncode}: {r.stderr[:200]}')
+        y, _ = sf.read(out_path, dtype='float32', always_2d=True)
+        return y
+    finally:
+        for p in (in_path, out_path):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
 
 def stretch_and_pitch(wav: np.ndarray, sr: int, src_bpm: float,
                       dst_bpm: float, semitones: float,
@@ -109,14 +186,25 @@ def stretch_and_pitch(wav: np.ndarray, sr: int, src_bpm: float,
         lo = src_bpm / max_bpm_ratio
         hi = src_bpm * max_bpm_ratio
         dst = max(lo, min(hi, dst))
-    if src_bpm > 0 and abs(src_bpm - dst) > 0.01:
+    rate = (dst / src_bpm) if (src_bpm > 0 and abs(src_bpm - dst) > 0.01) else 1.0
+    pitch = semitones if abs(semitones) > 0.01 else 0.0
+    if rate == 1.0 and pitch == 0.0:
+        return wav
+    # Try single-call path first (2× faster than pyrubberband two-pass).
+    if os.environ.get('AIJOCKEY_RB_COMBINED', '1') != '0':
         try:
-            x = pyrb.time_stretch(x, sr, dst / src_bpm)
+            return _rubberband_combined(x, sr, rate, pitch).T.astype(np.float32)
+        except Exception as e:
+            print(f"warn: rubberband single-call failed ({e}), falling back to two-pass")
+    # Fallback: original pyrubberband two-pass path.
+    if rate != 1.0:
+        try:
+            x = pyrb.time_stretch(x, sr, rate)
         except Exception as e:
             print(f"warn: time_stretch failed ({e}), using original")
-    if abs(semitones) > 0.01:
+    if pitch != 0.0:
         try:
-            x = pyrb.pitch_shift(x, sr, semitones)
+            x = pyrb.pitch_shift(x, sr, pitch)
         except Exception as e:
             print(f"warn: pitch_shift failed ({e}), using original")
     return x.T.astype(np.float32)
@@ -144,9 +232,16 @@ def render_segment(entry: dict, clips_meta: dict[str, dict],
     s_start = max(0, int(seg['start'] * SR))
     s_end = int(seg['end'] * SR)
     sliced = {n: s[:, s_start:s_end] for n, s in stems.items()}
-    processed = {n: stretch_and_pitch(s, SR, src_bpm, target_bpm, semitones,
-                                        max_bpm_ratio=max_bpm_ratio)
-                 for n, s in sliced.items()}
+    # Stretch + pitch each stem in parallel — pyrubberband is a subprocess
+    # that releases the GIL, so 4 stems run truly concurrently.
+    names = list(sliced.keys())
+
+    def _work(n):
+        return stretch_and_pitch(sliced[n], SR, src_bpm, target_bpm, semitones,
+                                  max_bpm_ratio=max_bpm_ratio)
+    with ThreadPoolExecutor(max_workers=_STEM_WORKERS) as ex:
+        results = list(ex.map(_work, names))
+    processed = dict(zip(names, results))
     # Equalize lengths (rubberband can produce slightly different sample counts)
     min_len = min(s.shape[1] for s in processed.values())
     processed = {n: s[:, :min_len] for n, s in processed.items()}
@@ -553,13 +648,21 @@ def execute(timeline_path: str, cache_dir: str, out_path: str,
     print(f"sample bank: real types={list(sample_bank.bank.keys())}, "
           f"synth types={list(sample_bank.list_available_types())}")
 
-    # Render all segments first
-    rendered = []
-    for i, entry in enumerate(tl):
-        print(f"rendering {i+1}/{len(tl)}: {entry['clip_id']} [{entry['segment']['type']}]")
+    # Render segments in parallel — each render is independent; the GIL
+    # is released during pyrubberband subprocess + torchaudio file I/O.
+    # Bounded by _RENDER_WORKERS so peak memory stays predictable.
+    def _render_one(idx_entry):
+        i, entry = idx_entry
         full, stems = render_segment(entry, clips_meta, cache_dir,
                                      max_bpm_ratio=max_bpm_ratio)
-        rendered.append({'entry': entry, 'full': full, 'stems': stems})
+        return i, {'entry': entry, 'full': full, 'stems': stems}
+
+    rendered: list[dict | None] = [None] * len(tl)
+    with ThreadPoolExecutor(max_workers=_RENDER_WORKERS) as ex:
+        for i, item in ex.map(_render_one, list(enumerate(tl))):
+            print(f"rendered {i+1}/{len(tl)}: {item['entry']['clip_id']} "
+                  f"[{item['entry']['segment']['type']}]")
+            rendered[i] = item
 
     output = rendered[0]['full']
     for i in range(1, len(rendered)):
@@ -568,6 +671,9 @@ def execute(timeline_path: str, cache_dir: str, out_path: str,
         target_bpm = float(cur['entry']['target_bpm'])
         print(f"transition {i}: {cur['entry']['transition_in']['name']}")
         output = apply_transition(output, prev, cur, sample_bank, target_bpm)
+        # Drop PCM of consumed segment — never referenced again.
+        # On a 10-segment / 600s mix this reclaims ~200MB per step.
+        rendered[i - 1] = None
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     torchaudio.save(out_path, torch.from_numpy(output.astype(np.float32)), SR)

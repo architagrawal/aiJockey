@@ -61,6 +61,54 @@ def load_clap() -> None:
     raise RuntimeError('No CLAP backend available. Install laion-clap or transformers.')
 
 
+def get_audio_embedding_batch(audios_48k: list[np.ndarray]) -> np.ndarray:
+    """Batched CLAP audio embeddings.
+
+    Input: list of 1-D float32 mono arrays at 48 kHz (variable length OK
+    — processor pads to longest in batch).
+    Output: (N, 512) float32 embeddings, same space as
+    `get_audio_embedding`.
+
+    Single GPU forward across N clips is ~Nx faster than N separate
+    forwards on the transformers backend. The laion-clap path stacks
+    via the library's native batched API.
+    """
+    if not audios_48k:
+        return np.zeros((0, 512), dtype=np.float32)
+    load_clap()
+    audios = [a.astype(np.float32) if a.ndim == 1 else a[0].astype(np.float32)
+              for a in audios_48k]
+
+    if _BACKEND == 'laion':
+        # laion-clap accepts (N, T) — pad to longest with zeros.
+        T = max(len(a) for a in audios)
+        stacked = np.zeros((len(audios), T), dtype=np.float32)
+        for i, a in enumerate(audios):
+            stacked[i, :len(a)] = a
+        emb = _MODEL.get_audio_embedding_from_data(stacked, use_tensor=False)
+        return np.asarray(emb, dtype=np.float32)
+
+    # transformers backend — processor handles padding.
+    import torch
+    try:
+        inputs = _PROCESSOR(
+            audios=audios, sampling_rate=48000, return_tensors='pt',
+            padding=True,
+        )
+    except (TypeError, ValueError):
+        inputs = _PROCESSOR(
+            audio=audios, sampling_rate=48000, return_tensors='pt',
+            padding=True,
+        )
+    if torch.cuda.is_available():
+        inputs = {k: v.cuda() if hasattr(v, 'cuda') else v
+                  for k, v in inputs.items()}
+    with torch.inference_mode():
+        out = _MODEL.get_audio_features(**inputs)
+    emb = _extract_embedding(out)
+    return emb.cpu().numpy().astype(np.float32)
+
+
 def get_audio_embedding(audio_48k: np.ndarray) -> np.ndarray:
     """
     Compute CLAP embedding for audio at 48 kHz.

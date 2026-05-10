@@ -58,6 +58,35 @@ def _get_analyzer():
     return _ANALYZER_SINGLETON
 
 
+def _run_single(analyzer, audio_path: Path, cid: str,
+                 precomputed_clap=None) -> bool:
+    import json
+    import numpy as np
+    cache_path = scratch_dir('cache')
+    try:
+        result = analyzer.analyze(str(audio_path), cid, cache_path,
+                                   precomputed_clap=precomputed_clap)
+    except TypeError:
+        # Older Analyzer.analyze signature without precomputed_clap kwarg.
+        result = analyzer.analyze(str(audio_path), cid, cache_path)
+    except Exception as e:
+        print(f"warn: analyze failed for {audio_path}: {e}")
+        return False
+    # Analyzer.analyze returns (ClipAnalysis, clap, energy).
+    if isinstance(result, tuple) and len(result) == 3:
+        ca, clap, energy = result
+        with atomic_write(_cache_path(cid)) as f:
+            from dataclasses import asdict
+            d = asdict(ca) if hasattr(ca, '__dataclass_fields__') else \
+                (ca.to_dict() if hasattr(ca, 'to_dict') else ca)
+            d['clap_embedding'] = list(map(float, clap.tolist()))
+            d['audio_path'] = str(audio_path)
+            json.dump(d, f, indent=2, default=str)
+        np.savez_compressed(str(cache_path / f'{cid}.npz'),
+                             clap=clap, energy=energy)
+    return True
+
+
 def process_one(audio_path: Path) -> bool:
     """Run analyze pipeline on one file. Returns True on success."""
     cid = _clip_id(audio_path)
@@ -69,43 +98,75 @@ def process_one(audio_path: Path) -> bool:
         print(f"err: cannot init Analyzer ({e})")
         return False
     print(f"S1 analyze {audio_path.name} -> {cid}")
-    try:
-        feat = analyzer.analyze_clip(str(audio_path), clip_id=cid,
-                                      cache_dir=str(scratch_dir('cache')))
-    except AttributeError:
-        # Fall back to module-level analyze_pool API for backward compat.
-        try:
-            from analyze import analyze_pool
-            analyze_pool(str(audio_path.parent),
-                         str(scratch_dir('cache')),
-                         device=os.environ.get('AI_DEVICE', 'cuda'),
-                         force=False, workers=1)
-            feat = None
-        except Exception as e:
-            print(f"warn: analyze_pool fallback failed for {audio_path}: {e}")
-            return False
-    except Exception as e:
-        print(f"warn: analyze failed for {audio_path}: {e}")
-        return False
+    return _run_single(analyzer, audio_path, cid)
 
-    if feat is not None:
-        with atomic_write(_cache_path(cid)) as f:
-            import json
-            json.dump(feat.to_dict() if hasattr(feat, 'to_dict') else feat, f,
-                      indent=2, default=str)
-    return True
+
+def _batch_clap(audio_paths: list[Path]):
+    """Pre-load 48 kHz mono audio for each clip, run a single batched
+    CLAP forward, return list of 512-d embeddings (None entries for
+    paths that failed to load).
+    """
+    import numpy as np
+    try:
+        import librosa
+        from clap_wrapper import get_audio_embedding_batch
+    except ImportError:
+        return [None] * len(audio_paths)
+    audios: list = []
+    valid_idx: list[int] = []
+    for i, p in enumerate(audio_paths):
+        try:
+            wav, _sr = librosa.load(str(p), sr=48000, mono=True)
+            audios.append(wav.astype(np.float32))
+            valid_idx.append(i)
+        except Exception as e:
+            print(f"warn: clap preload {p} failed ({e})")
+    out: list = [None] * len(audio_paths)
+    if not audios:
+        return out
+    try:
+        embs = get_audio_embedding_batch(audios)
+    except Exception as e:
+        print(f"warn: batched CLAP failed ({e}); falling back to per-clip")
+        return [None] * len(audio_paths)
+    for row, orig_i in enumerate(valid_idx):
+        out[orig_i] = embs[row]
+    return out
 
 
 def process_batch(audio_paths: list[Path]) -> int:
-    """Batch entry point. Currently delegates to process_one in a loop —
-    Demucs internal batching across multiple clips is non-trivial because
-    sources vary in length. Real batching would group equal-length chunks
-    and apply_model on stacks. Singleton analyzer at least avoids model
-    reload cost.
+    """Batched entry point.
+
+    Strategy: CLAP is the only HF-model step that can be safely
+    cross-clip batched (variable-length OK via processor padding).
+    Demucs/madmom/librosa beats remain per-clip — they have intrinsic
+    variable-length pipelines and small batches don't help on GPU.
+    Pre-batching CLAP eliminates the per-clip CLAP forward (~1-2s) and
+    is the largest single win for stage1 throughput.
+
+    Disable with AIJOCKEY_BATCH_CLAP=0 to fall back to per-clip path.
     """
+    if not audio_paths:
+        return 0
+    try:
+        analyzer = _get_analyzer()
+    except Exception as e:
+        print(f"err: cannot init Analyzer ({e})")
+        return 0
+
+    # Skip already-done clips up front so CLAP batch matches actual work.
+    work: list[Path] = [p for p in audio_paths if not _is_done(p)]
+    if not work:
+        return len(audio_paths)
+    cids = [_clip_id(p) for p in work]
+
+    use_batch = os.environ.get('AIJOCKEY_BATCH_CLAP', '1') != '0'
+    claps = _batch_clap(work) if use_batch else [None] * len(work)
+
     ok = 0
-    for p in audio_paths:
-        if process_one(p):
+    for p, cid, c in zip(work, cids, claps):
+        print(f"S1 analyze {p.name} -> {cid}")
+        if _run_single(analyzer, p, cid, precomputed_clap=c):
             ok += 1
     return ok
 

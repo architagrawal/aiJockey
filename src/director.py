@@ -379,7 +379,17 @@ def _call_qwen2audio(user_message: str, audio_paths: list[str],
     else:
         from transformers import Qwen2AudioForConditionalGeneration, AutoProcessor
         proc = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        # Prefer bf16 on bf16-capable GPUs (MI300X, A100, H100): same speed
+        # as fp16 with wider exponent range — eliminates fp16 NaN risk in
+        # long-context generation. Fall through to fp16 on older silicon.
+        if torch.cuda.is_available():
+            try:
+                bf16_ok = torch.cuda.is_bf16_supported()
+            except Exception:
+                bf16_ok = False
+            dtype = torch.bfloat16 if bf16_ok else torch.float16
+        else:
+            dtype = torch.float32
         model = Qwen2AudioForConditionalGeneration.from_pretrained(
             model_id, torch_dtype=dtype,
             device_map="auto" if torch.cuda.is_available() else None,
@@ -417,7 +427,7 @@ def _call_qwen2audio(user_message: str, audio_paths: list[str],
                   sampling_rate=target_sr)
     if torch.cuda.is_available():
         inputs = {k: v.cuda() if hasattr(v, "cuda") else v for k, v in inputs.items()}
-    with torch.no_grad():
+    with torch.inference_mode():
         gen = model.generate(
             **inputs,
             max_new_tokens=512,
@@ -440,9 +450,17 @@ def _call_hf_instruct(user_message: str, model_id: str) -> str:
         tok, model = _LLM_CACHE[0], _LLM_CACHE[1]
     else:
         tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        if torch.cuda.is_available():
+            try:
+                bf16_ok = torch.cuda.is_bf16_supported()
+            except Exception:
+                bf16_ok = False
+            _dtype = torch.bfloat16 if bf16_ok else torch.float16
+        else:
+            _dtype = torch.float32
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            torch_dtype=_dtype,
             device_map="auto" if torch.cuda.is_available() else None,
             trust_remote_code=True,
         )
@@ -461,7 +479,7 @@ def _call_hf_instruct(user_message: str, model_id: str) -> str:
     inputs = tok(prompt, return_tensors="pt", truncation=True, max_length=2048)
     if torch.cuda.is_available():
         inputs = {k: v.cuda() for k, v in inputs.items()}
-    with torch.no_grad():
+    with torch.inference_mode():
         gen = model.generate(
             **inputs,
             max_new_tokens=512,
