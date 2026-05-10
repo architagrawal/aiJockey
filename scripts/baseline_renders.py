@@ -68,6 +68,9 @@ def main() -> None:
     ap.add_argument('--apply_llm_tiers', action='store_true')
     ap.add_argument('--src_dir', default='src',
                     help='where main.py lives')
+    ap.add_argument('--improve_max_passes', type=int, default=0,
+                    help='Forward to main.py execute (0=baseline, 1+=improver)')
+    ap.add_argument('--improve_threshold', type=float, default=0.5)
     args = ap.parse_args()
 
     prompts = _load_prompts(args.prompts_file)
@@ -119,6 +122,8 @@ def main() -> None:
                 '--timeline', str(tl),
                 '--cache', args.cache,
                 '--out', str(wav),
+                '--improve_max_passes', str(args.improve_max_passes),
+                '--improve_threshold', str(args.improve_threshold),
             ]
             r = subprocess.run(exec_cmd, capture_output=True, text=True)
             if r.returncode != 0:

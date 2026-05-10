@@ -218,6 +218,12 @@ def stretch_and_pitch(wav: np.ndarray, sr: int, src_bpm: float,
                       max_bpm_ratio: float | None = None) -> np.ndarray:
     """rubberband expects (T, channels). wav is (channels, T)."""
     x = wav.T.astype(np.float32)
+    # Tempo octave clamp: beat trackers (BT, madmom) sometimes detect
+    # half/double tempo (trap 130 → 65). Without this, rubberband stretches
+    # at 2x ratio → pitch warp + phrase-grid misalign. 1-line clamp picks
+    # the canonical octave when ratio falls outside [0.66, 1.55].
+    from tempo_octave import clamp_octave
+    src_bpm = clamp_octave(src_bpm, dst_bpm)
     dst = float(dst_bpm)
     if src_bpm > 0 and max_bpm_ratio and max_bpm_ratio > 1.0:
         lo = src_bpm / max_bpm_ratio

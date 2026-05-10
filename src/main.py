@@ -221,6 +221,19 @@ def cmd_execute(args: argparse.Namespace) -> None:
             print("[improver] no actionable edits; stopping")
             break
         touched = apply_edits(tl, report.edits)
+        # Planner-level re-pick for any segment flagged by energy_repick edits.
+        # Without this step the flag is set but execute renders the same
+        # segment — energy_repick was a stub. Now: pick a different segment
+        # from the SAME clip whose energy matches the improver target.
+        try:
+            from planner import load_clips, repick_energy_constrained_segments
+            clips_for_repick = load_clips(args.cache)
+            tl, n_repicked = repick_energy_constrained_segments(
+                tl, clips_for_repick)
+            if n_repicked:
+                print(f"[improver] planner re-picked {n_repicked} segment(s)")
+        except Exception as _e:
+            print(f"[improver] re-pick skipped ({_e})")
         edited_path = args.timeline.replace('.json', f'.improved{pass_i + 1}.json')
         if isinstance(blob, dict):
             blob['timeline'] = tl

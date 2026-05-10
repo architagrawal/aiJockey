@@ -96,6 +96,19 @@ def _atomic_append(path: Path, line: str) -> None:
         raise
 
 
+def _improver_env_state() -> dict:
+    """Snapshot the improver gating env at log time. Required field for
+    cohort bucketing in summarize(). Without this, post-hoc analysis can't
+    tell which improver knobs were on for any given row.
+    """
+    return {
+        'energy': os.environ.get('AIJOCKEY_IMPROVER_ENERGY', '1'),
+        'overlap': os.environ.get('AIJOCKEY_IMPROVER_OVERLAP', '1'),
+        'swap': os.environ.get('AIJOCKEY_IMPROVER_SWAP', '1'),
+        'cohort': os.environ.get('AIJOCKEY_COHORT', ''),  # human label
+    }
+
+
 def log_render(*,
                job_id: str,
                prompt: str | None = None,
@@ -157,6 +170,7 @@ def log_render(*,
         } if probe else None,
         'improver': improver,
     }
+    row['improver_state'] = _improver_env_state()
     if extra:
         row['extra'] = extra
     p = _log_path()
@@ -212,6 +226,20 @@ def summarize(rows: list[dict] | None = None) -> dict:
         by_mode.setdefault(m, []).append(float(s))
         by_arc.setdefault(a, []).append(float(s))
     fallback = sum(1 for r in rows if r.get('director_fallback'))
+    by_cohort: dict[str, list[float]] = {}
+    by_state: dict[str, list[float]] = {}
+    for r in rows:
+        s = (r.get('probe') or {}).get('overall_severity')
+        if s is None:
+            continue
+        st = r.get('improver_state') or {}
+        cohort = st.get('cohort') or 'unlabeled'
+        by_cohort.setdefault(cohort, []).append(float(s))
+        # State key = "E1O0S0" etc — collapses energy/overlap/swap into one tag
+        skey = (f"E{st.get('energy', '?')}"
+                f"O{st.get('overlap', '?')}"
+                f"S{st.get('swap', '?')}")
+        by_state.setdefault(skey, []).append(float(s))
     return {
         'n': len(rows),
         'mean_severity': round(sum(sevs) / len(sevs), 3),
@@ -221,6 +249,11 @@ def summarize(rows: list[dict] | None = None) -> dict:
                     for k, v in by_mode.items()},
         'by_arc': {k: {'n': len(v), 'mean': round(sum(v) / len(v), 3)}
                    for k, v in by_arc.items()},
+        'by_cohort': {k: {'n': len(v), 'mean': round(sum(v) / len(v), 3),
+                          'p50': round(sorted(v)[len(v)//2], 3)}
+                      for k, v in by_cohort.items()},
+        'by_improver_state': {k: {'n': len(v), 'mean': round(sum(v) / len(v), 3)}
+                               for k, v in by_state.items()},
         'fallback_rate': round(fallback / len(rows), 3),
     }
 
@@ -232,9 +265,21 @@ def main() -> None:
     sub = ap.add_subparsers(dest='cmd', required=True)
     s = sub.add_parser('summary')
     s.add_argument('--path', default=None)
+    s.add_argument('--by_cohort', action='store_true',
+                   help='emit per-cohort table only')
     args = ap.parse_args()
     if args.cmd == 'summary':
-        print(json.dumps(summarize(read_log(args.path)), indent=2))
+        rows = read_log(args.path)
+        out = summarize(rows)
+        if args.by_cohort:
+            cohorts = out.get('by_cohort') or {}
+            print(f"{'cohort':<14} {'n':>4} {'mean':>7} {'p50':>7}")
+            print('-' * 40)
+            for c in sorted(cohorts):
+                d = cohorts[c]
+                print(f"{c:<14} {d['n']:>4} {d['mean']:>7.3f} {d['p50']:>7.3f}")
+            return
+        print(json.dumps(out, indent=2))
 
 
 if __name__ == '__main__':

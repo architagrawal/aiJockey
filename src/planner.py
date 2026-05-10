@@ -319,6 +319,70 @@ def pick_segment(clip: dict, prefer: str | None = None,
 # Beam search
 # ---------------------------------------------------------------------------
 
+def repick_energy_constrained_segments(
+    timeline: list[dict],
+    clips: dict[str, dict],
+    min_seconds: float = 30.0,
+) -> tuple[list[dict], int]:
+    """Surgical re-pick: scan timeline for entries flagged by improver
+    (`_improver_repick=True` with `_improver_target_energy` hint) and
+    re-pick segment from the same clip matching that energy.
+
+    Returns (new_timeline, n_repicked). When the clip exposes only one
+    long-enough section, leaves the entry unchanged. Excludes the current
+    segment index from candidates so a re-pick always returns a NEW choice
+    when one exists.
+
+    Energy target derivation: if improver provides `_improver_target_energy`
+    use that. Otherwise infer from db_diff direction stored on the entry —
+    db_diff > 0 means cur was too LOUD vs prev (target lower energy);
+    < 0 means cur was too QUIET (target higher energy). Crude but
+    actionable when no exact target supplied.
+    """
+    n_repicked = 0
+    for idx, entry in enumerate(timeline):
+        seg = entry.get('segment') or {}
+        if not seg.get('_improver_repick'):
+            continue
+        cid = entry.get('clip_id')
+        clip = clips.get(cid)
+        if clip is None:
+            continue
+        target = seg.get('_improver_target_energy')
+        if target is None:
+            db_diff = float(seg.get('_improver_db_diff', 0.0))
+            cur_energy = float(seg.get('energy', 0.5))
+            # Target = current ± 0.2 (clamped to [0.05, 0.95])
+            if db_diff > 0:
+                target = max(0.05, cur_energy - 0.2)
+            else:
+                target = min(0.95, cur_energy + 0.2)
+        # Identify current segment index in clip.sections (best-match by start time)
+        sections = clip.get('sections', [])
+        current_seg_idx = -1
+        if sections:
+            cur_start = float(seg.get('start', -1))
+            for i, s in enumerate(sections):
+                if abs(float(s.get('start', 0)) - cur_start) < 0.5:
+                    current_seg_idx = i
+                    break
+        new_seg, new_idx = pick_segment(
+            clip,
+            target_energy=float(target),
+            exclude_indices={current_seg_idx} if current_seg_idx >= 0 else None,
+            min_seconds=min_seconds,
+            prefer_instrumental=True,  # transition boundaries
+        )
+        if new_idx == current_seg_idx or new_idx < 0:
+            continue  # nothing better available
+        # Preserve target_bpm/target_key + transition_in; only swap segment.
+        new_seg['_improver_repicked_from_idx'] = current_seg_idx
+        new_seg['_improver_target_energy'] = float(target)
+        entry['segment'] = new_seg
+        n_repicked += 1
+    return timeline, n_repicked
+
+
 def compute_pool_coherence(clips: dict[str, dict]) -> float:
     """Mean pairwise normalized CLAP cosine (0..1). High ≈ homogeneous pool."""
     ids = list(clips.keys())
