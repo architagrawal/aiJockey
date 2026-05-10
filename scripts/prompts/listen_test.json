@@ -1,0 +1,62 @@
+[
+  {
+    "id": "lt01",
+    "prompt": "smooth groove deep house warmup",
+    "arc": "build",
+    "tests": "Director not over-dramatizing on conservative prompt. Expect mostly minor tier, ≤1 major. No drop tier."
+  },
+  {
+    "id": "lt02",
+    "prompt": "festival peak euphoric drops big bass",
+    "arc": "peak",
+    "tests": "Drop tier engaging when pool has drop-section material. Risers + impacts overlay correct."
+  },
+  {
+    "id": "lt03",
+    "prompt": "after-hours techno hypnotic loop",
+    "arc": "flat_low",
+    "tests": "All-minor restraint. No accent-FX overlays (Phase 1 cap). Stable BPM hold."
+  },
+  {
+    "id": "lt04",
+    "prompt": "warmup ambient build to peak hour",
+    "arc": "build",
+    "tests": "Arc transition: low energy start, climbs, ends with drop. Tier distribution per arc rules."
+  },
+  {
+    "id": "lt05",
+    "prompt": "melodic house emotional sunset rooftop",
+    "arc": "build",
+    "tests": "Pool-coherent narrative when material clusters by genre. Library augmentation if mix_mode=balanced."
+  },
+  {
+    "id": "lt06",
+    "prompt": "drum and bass liquid roller smooth",
+    "arc": "build",
+    "tests": "DnB tempo (165-180 BPM) doesn't trigger half-time octave clamp by accident. Stretch ratios sane."
+  },
+  {
+    "id": "lt07",
+    "prompt": "trap heavy 808 menacing peak",
+    "arc": "peak",
+    "tests": "Trap tempo half-time interpretation handled (tempo_octave clamp). 64bpm-tagged clips don't 2x-stretch."
+  },
+  {
+    "id": "lt08",
+    "prompt": "lofi hip hop coffee shop chill",
+    "arc": "flat_low",
+    "tests": "Restraint on chill prompt. No drops. Stem-swap working on instrumental beats."
+  },
+  {
+    "id": "lt09",
+    "prompt": "wild journey peaks valleys cuts surprises",
+    "arc": "peak",
+    "tests": "Director uses full tier vocabulary on disparate prompt. Constitutional rules don't over-suppress drama."
+  },
+  {
+    "id": "lt10",
+    "prompt": "indian fusion sitar tabla bass",
+    "arc": "build",
+    "tests": "Cross-cultural fusion. BPM/key compatibility on non-Western pool. Phrase quantize on irregular meters."
+  }
+]

@@ -20,7 +20,7 @@ import torchaudio
 import pyrubberband as pyrb
 
 import transitions as T
-from camelot import semitones_between
+from camelot import semitones_between, camelot_distance
 from phrase import snap_to_phrase
 from samples import SampleBank
 
@@ -530,6 +530,24 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
     max_overlap_samples = max(bar_samples,
                                min(cur_len, out_len) // 3)
     max_overlap_samples = min(max_overlap_samples, abs_cap_samples)
+    # Harmonic-distance overlap cap. Long overlaps on dissonant key pairs
+    # stack semitone clashes audibly; tighten window so clash exposure is
+    # short. Inspired by kckDeepak/AI-DJ-Mixing-System (Camelot-driven
+    # dynamic overlap). Disable with AIJOCKEY_HARMONIC_OVERLAP_CAP=0.
+    if os.getenv('AIJOCKEY_HARMONIC_OVERLAP_CAP', '1') != '0':
+        prev_key = prev['entry'].get('_clip_key', '?') if prev else '?'
+        cur_key = cur['entry'].get('_clip_key', '?')
+        key_dist = camelot_distance(prev_key, cur_key)
+        if key_dist >= 4:
+            harm_cap = 4 * bar_samples
+        elif key_dist >= 2:
+            harm_cap = 6 * bar_samples
+        else:
+            harm_cap = max_overlap_samples
+        if harm_cap < max_overlap_samples:
+            max_overlap_samples = harm_cap
+            tech['harmonic_dist'] = key_dist
+            tech['harmonic_cap_bars'] = harm_cap // bar_samples
     overlap_n = min(int(bars * 4 * beat_dur * SR), max_overlap_samples)
     # Critical: transition primitives (crossfade_transition, eq_swap_transition,
     # etc.) recompute overlap from `bars` internally. We must shadow `bars`
@@ -703,6 +721,11 @@ def execute(timeline_path: str, cache_dir: str, out_path: str,
             continue
         with open(Path(cache_dir) / f'{cid}.json') as f:
             clips_meta[cid] = json.load(f)
+
+    # Stash per-clip key on each entry for harmonic-distance overlap cap
+    # (apply_transition reads entry['_clip_key']). Camelot codes only.
+    for entry in tl:
+        entry['_clip_key'] = clips_meta[entry['clip_id']].get('key', '?')
 
     # Phrase-quantize segment boundaries so junctions land on real phrase 1.
     # Disable with AIJOCKEY_PHRASE_QUANTIZE=0 if A/B testing.
