@@ -41,15 +41,26 @@ Heavy work (**never** on the Space CPU for real generation): analyze, optional D
 | `AI_DEVICE` | no | `cuda` | On ROCm PyTorch still use `cuda` string. |
 | `AIJOCKEY_JOB_TIMEOUT_SEC` | no | `1200` | Wall-clock ceiling for one job (asyncio `wait_for` around the worker thread). Returns **504** if exceeded. |
 | `AIJOCKEY_USE_DIRECTOR_LLM` | no | `1` | Set `0` to skip HF LLM load (faster cold start; fallback JSON). |
-| `HF_DIRECTOR_MODEL` | no | `Qwen/Qwen2.5-7B-Instruct` | First request downloads weights; ensure disk and HF access. Use `Qwen/Qwen2-Audio-7B-Instruct` for multimodal (audio-aware) Director. |
+| `HF_DIRECTOR_MODEL` | no | text path: `Qwen/Qwen3-8B-Instruct`; audio path: `Qwen/Qwen2-Audio-7B-Instruct` | Default branches on whether `audio_clip_paths` are passed (e.g. `/generate` user uploads always pass them). First request downloads weights. Qwen3-8B needs `transformers>=4.51`. Set explicitly to pin a specific model (e.g. `Qwen/Qwen2.5-7B-Instruct` to revert). |
 | `AIJOCKEY_PHASE` | no | `1` | `1` = Phase A polish (3-tier vocab, sample whitelist, stem-swap on); `2` = full vocab + meme samples. |
 | `AIJOCKEY_PHRASE_QUANTIZE` | no | `1` | Snap segment boundaries to clip downbeats grid. |
 | `AIJOCKEY_STEM_SWAP` | no | `1` | Stem-additive overlap path (eliminates subtractive vocal-mute phasing). |
 | `AIJOCKEY_CONSTITUTIONAL` | no | `1` | Hard musical-rule validator + auto-repair on violations. |
+| `AIJOCKEY_INSTRUMENTAL_ONLY` | no | unset | Per-request flag set by `/generate` `instrumental_only=true`. Drops vocals stem from full mix everywhere, not just overlap. Save/restore around request scope. |
+| `AIJOCKEY_DEMUCS_MODEL` | no | `htdemucs_ft` | Demucs checkpoint name (`htdemucs`, `htdemucs_ft`, `mdx_extra_q`, ...). `_ft` is fine-tuned variant of `htdemucs` — same arch, ~0.5 dB SDR cleaner stems. |
+| `AIJOCKEY_DEMUCS_OVERLAP` | no | `0.10` | Demucs window overlap. Lower = faster, slight artifact risk. Demucs default was `0.25`. |
+| `AIJOCKEY_STEM_WORKERS` | no | `4` | Parallel rubberband workers per render_segment (= stem count). |
+| `AIJOCKEY_RENDER_WORKERS` | no | `2` | Parallel timeline-segment renders. Each ~200MB PCM peak; raise on big-RAM hosts. |
+| `AIJOCKEY_RB_COMBINED` | no | `1` | Single-call rubberband (`--tempo` + `--pitch` in one subprocess). Falls back to two-pass on failure. |
+| `AIJOCKEY_RUBBERBAND_BIN` | no | `rubberband` | Path to `rubberband` CLI binary. |
+| `AIJOCKEY_BATCH_CLAP` | no | `1` | Stage 1 batched CLAP forward across pending clips. |
+| `AIJOCKEY_CAPTION_BATCH` | no | `8` | Stage 3 caption batch size for Qwen2-Audio. |
 | `AIJOCKEY_DTYPE` | no | `bfloat16` | Mixed precision dtype for training/inference. |
 | `AIJOCKEY_COMPILE` | no | `1` | torch.compile on model forward paths. |
-| `AIJOCKEY_FLASH_ATTN` | no | `2` | HF transformers `attn_implementation`: `0`=eager, `1`=sdpa, `2`=flash_attention_2. |
-| `AIJOCKEY_QLORA` | no | `0` | 4-bit QLoRA load for big-model fine-tune (turn on for 72B Director DPO). |
+| `AIJOCKEY_COMPILE_MODE` | no | `default` | `default`/`reduce-overhead`/`max-autotune`. ROCm 6.0 HIP graphs less stable — `default` safer. |
+| `AIJOCKEY_FLASH_ATTN` | no | `1` | HF transformers `attn_implementation`: `0`=eager, `1`=sdpa, `2`=flash_attention_2. **`2` requires ROCm-CK fork of flash-attn — stock `pip install flash-attn` does NOT build on ROCm.** |
+| `AIJOCKEY_QLORA` | no | `0` | 4-bit QLoRA load for big-model fine-tune. Needs `bitsandbytes-rocm` on AMD. |
+| `AIJOCKEY_INT8` | no | `0` | 8-bit weight quant for inference. Needs `bitsandbytes-rocm` on AMD. |
 | `AIJOCKEY_OPTIMIZER` | no | `lion` | `lion`/`sophia`/`adamw8bit`/`adamw`. |
 | `AIJOCKEY_PREF_METHOD` | no | `orpo` | Preference training method: `orpo`/`dpo`/`kto`. |
 | `AIJOCKEY_SCRATCH` | no | `/scratch` | Pipeline scratch root (S0–S9 stage queues). |
@@ -87,11 +98,19 @@ curl -s "${URL}/ready" | jq .
 - `preset`: key in `server.api.PRESETS` (e.g. `festival_inferno`) *or* supply custom `prompt` + `arc`
 - `duration`: seconds, **30–600** (effective max may be lower without `use_library`)
 - `use_library`: `true`/`false` — merges pre-analyzed clips from `clips/` + `cache/` if present
+- `mix_mode`: `tight` (user clips only) | `balanced` (default; library fills 30% headroom) | `exploratory` (heavier library augmentation)
+- `library_role` (optional): `any` | `fill_gaps` | `warmup_outro` | `bridges_only`
+- `instrumental_only`: `true` (default) — drops vocals stem from full mix everywhere; toggle off for vocal mixes
 - `lufs`: float (e.g. `-9` club)
 - `export_format`: `mp3` | `wav` | `flac`
 - Optional: `prompt`, `arc`, `seed`
 
-**Response:** binary audio; headers **`X-Job-Id`**, optional **`X-Ingest-Warnings`** (e.g. low MP3 bitrate).
+**Audio Director caveats** (auto-engaged when files uploaded):
+- Default model: `Qwen/Qwen2-Audio-7B-Instruct` (~14 GB first-run download)
+- Hard cap: model hears **first 6 user clips × 30 s window each** (memory bound). Pools >6 clips: extra clips planned via metadata only, not audibly grounded
+- Override with `HF_DIRECTOR_MODEL=Qwen/Qwen2.5-7B-Instruct` for text-only path (no audio understanding, faster cold start)
+
+**Response:** binary audio; headers **`X-Job-Id`**, **`X-Mix-Mode`**, **`X-Clips-Used`** (JSON `{user_count, library_count, library_ids[]}`), optional **`X-Ingest-Warnings`** (e.g. low MP3 bitrate).
 
 **Failure codes:** `401` bad key, `400` validation, `503` busy, `504` timeout, `500` pipeline error.
 

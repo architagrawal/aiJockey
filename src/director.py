@@ -395,11 +395,13 @@ def run_director(
         # Default Director model: audio-capable if audio paths provided AND
         # the env variable is unset, so /generate hears user clips out of
         # the box. Set HF_DIRECTOR_MODEL explicitly to override (e.g. to a
-        # text-only Qwen2.5-Instruct when running on a CPU dev box).
+        # text-only Qwen3-Instruct when running on a CPU dev box).
+        # Text default: Qwen3-8B-Instruct — better JSON adherence and
+        # narrative reasoning than Qwen2.5-7B at similar VRAM cost.
         if audio_clip_paths:
             default_model = "Qwen/Qwen2-Audio-7B-Instruct"
         else:
-            default_model = "Qwen/Qwen2.5-7B-Instruct"
+            default_model = "Qwen/Qwen3-8B-Instruct"
         model_id = os.environ.get("HF_DIRECTOR_MODEL", default_model)
         is_audio_model = "audio" in model_id.lower() and audio_clip_paths
         # Pool intelligence: inject a clip-by-clip inventory so Director
@@ -495,7 +497,7 @@ def _call_qwen2audio(user_message: str, audio_paths: list[str],
 
     if not audios:
         # No audio loaded — fall back to text path
-        return _call_hf_instruct(user_message, "Qwen/Qwen2.5-7B-Instruct")
+        return _call_hf_instruct(user_message, "Qwen/Qwen3-8B-Instruct")
 
     # Build conversation with one <audio> placeholder per clip
     user_content: list[dict] = []

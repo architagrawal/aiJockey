@@ -43,12 +43,19 @@ class ClipAnalysis:
 
 
 class Analyzer:
-    def __init__(self, device: str = 'cuda', demucs_model: str = 'htdemucs'):
+    def __init__(self, device: str = 'cuda', demucs_model: str | None = None):
         self.device = device if (device == 'cpu' or torch.cuda.is_available()) else 'cpu'
         if device != self.device:
             print(f"warn: requested {device}, using {self.device}")
         # Lazy imports — heavy
         from demucs.pretrained import get_model
+        # Default to htdemucs_ft (fine-tuned variant): same architecture as
+        # htdemucs but ~0.5 dB SDR cleaner stems on MUSDB18, no extra cost.
+        # Override with AIJOCKEY_DEMUCS_MODEL env var (e.g. 'htdemucs',
+        # 'mdx_extra_q', or a custom checkpoint name).
+        if demucs_model is None:
+            demucs_model = os.environ.get('AIJOCKEY_DEMUCS_MODEL', 'htdemucs_ft')
+        print(f"[analyze] demucs model: {demucs_model}")
         self.demucs = get_model(demucs_model).to(self.device)
         self.demucs.eval()
         # Use wrapper that picks laion-clap if available, else HF transformers
@@ -57,14 +64,22 @@ class Analyzer:
         self.clap.load_ckpt()
         # Phase A polish §16.2 efficiency hooks: bf16 + torch.compile.
         # Demucs benefits substantially from compile on MI300X.
+        # NOTE: htdemucs_ft (and any BagOfModels) wraps multiple models and
+        # does NOT expose `.segment` — torch.compile then breaks
+        # demucs.apply.apply_model with AttributeError. Skip compile for
+        # BagOfModels variants; bf16 autocast still applies in stems().
         try:
             from training.efficiency import maybe_compile, get_dtype
+            from demucs.apply import BagOfModels
             self._compute_dtype = get_dtype()
-            if self.device == 'cuda':
+            if self.device == 'cuda' and not isinstance(self.demucs, BagOfModels):
                 # mode chosen by AIJOCKEY_COMPILE_MODE (defaults to 'default'
                 # for ROCm-safe HIP graph behavior; opt into 'reduce-overhead'
                 # explicitly when validated on the target accelerator).
                 self.demucs = maybe_compile(self.demucs)
+            elif isinstance(self.demucs, BagOfModels):
+                print(f"[analyze] skipping torch.compile (BagOfModels {demucs_model} "
+                      f"incompat with apply_model.segment access)")
         except Exception as e:
             print(f"[analyze] efficiency hooks skipped ({e})")
             self._compute_dtype = torch.float32

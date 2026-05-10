@@ -1,7 +1,104 @@
 # AiJockey — Status, Progress, Plan, Bugs
 
 Snapshot of what works, what's broken, what's next.
-Last updated: 2026-05-09 (post Phase A polish branch — `best-output-pipeline`).
+Last updated: 2026-05-09 (post review + perf + ROCm pass on `best-output-pipeline`).
+
+---
+
+## Session update — code review + perf + ROCm hardening (2026-05-09)
+
+Branch `best-output-pipeline` reviewed end-to-end. 9 correctness bugs, 6 ROCm compat issues, 9 perf wins, audio-Director wiring, and 2 model swaps applied. All syntax-clean. Render path independent of training pipeline — usable on user clips without library/self-play.
+
+### Correctness fixes
+| File | Bug | Fix |
+|------|-----|-----|
+| `server/api.py:549` | `AIJOCKEY_INSTRUMENTAL_ONLY` env mutation outside try/finally — crash leaves process stuck | save/restore around `_run_generate_sync` call |
+| `scripts/stage7_dpo.py:65` | non-atomic append race with S5 → duplicate DPO pairs | rewrite-with-atomic_write + dedupe pre-existing rows |
+| `src/execute.py:431,441` | `sum(generator)` → `int 0` on empty stems → `stem_swap_transition(0,...)` numpy crash | use `_stem_sum(...,('drums','bass','other'))`; None-guard |
+| `src/execute.py:227` | `inst[:,-(n+r):-n]` ramp slice unguarded → shape mismatch | clamp ramp_n by inst/vox actual lengths |
+| `scripts/pipeline/common.py:85` | `watch()` adds `seen` after yield → consumer crash drops file forever | only mark seen when no done_marker; with marker, marker is source of truth |
+| `src/director.py:333,403` | system prompt sent twice (concat + system role) → 2048-token truncation | drop concat at both call sites |
+| `src/training/augment.py:51` | `speed_perturb` was no-op (returned input + new_sr) | actual `librosa.resample` with safe fallback |
+| `tests/test_samples_gating.py:44` | Phase2 test silently passes if `airhorns` absent from SYNTHESIZERS | precondition assert + module reset |
+| `scripts/pipeline_launch.sh:28` | unquoted `ENV_PREFIX`/`PY` in tmux send-keys breaks on space-paths | `printf %q` everywhere |
+
+### ROCm/AMD compat
+| Concern | Fix |
+|---------|-----|
+| `attn_implementation='flash_attention_2'` default kills model load on stock ROCm wheel | `efficiency.py:hf_attn_implementation()` default → `'sdpa'`; FA2 opt-in via `AIJOCKEY_FLASH_ATTN=2` after building ROCm-CK fork |
+| `torch.compile(mode='reduce-overhead')` brittle on ROCm 6.0 HIP graphs | default → `'default'`; `AIJOCKEY_COMPILE_MODE` override |
+| `int8_quant_config()` always returned BNB config (CUDA-only) | env-gated by `AIJOCKEY_INT8` |
+| `pipeline_launch.sh` set `AIJOCKEY_FLASH_ATTN=2` | downgraded to `=1` (sdpa) |
+| `transformers>=4.30` too loose for Qwen2-Audio + ORPO | bumped to `>=4.43.0` (bump again to `>=4.51.0` when adopting Qwen3 family) |
+| `requirements-rocm.txt` missing training deps | added `accelerate`, `peft`, `trl`, `datasets`, `lion-pytorch`; documented `bitsandbytes-rocm` + ROCm flash-attn as opt-in |
+
+### Performance (already in branch + this session)
+- **`load_stems` parallel I/O** — 4 stem WAVs concurrently via ThreadPoolExecutor (~3× I/O step)
+- **`render_segment` stem-parallel rubberband** — 4 stems stretched/pitched concurrently (pyrubberband releases GIL) → ~3-4× CPU util on hot path
+- **Timeline render parallelism** — `_RENDER_WORKERS=2` default, env-tunable; ~2× wall on N-segment mix
+- **Free-as-you-go memory** — `rendered[i-1] = None` after consumed; ~200MB/segment reclaimed
+- **Single-call rubberband** — `_rubberband_combined` calls binary once with `--tempo` + `--pitch` flags; cuts subprocess spawns + tempfile WAV roundtrips in half. Falls back to two-pass on failure. Disable: `AIJOCKEY_RB_COMBINED=0`
+- **Demucs perf** — `overlap=0.10` (was 0.25, ~15% faster); bf16 autocast on GPU (~1.5-2× throughput on MI300X); compile mode default → `default` (ROCm-safe)
+- **cuDNN/MIOpen autotune** — `cudnn.benchmark=True` + `set_float32_matmul_precision('high')` at execute module init
+- **Director inference** — `inference_mode()` instead of `no_grad()`; bf16 dtype on bf16-capable GPUs (auto-detect via `torch.cuda.is_bf16_supported()`)
+- **CLAP batched embeddings** — new `get_audio_embedding_batch(audios)` in `clap_wrapper.py`; `Analyzer.analyze` accepts `precomputed_clap=`; S1 `process_batch` pre-loads 48k mono for all pending clips, single batched CLAP forward, then per-clip demucs/beats. ~Nx CLAP step speedup. Disable: `AIJOCKEY_BATCH_CLAP=0`
+- **Caption batched** — `_Captioner.caption_batch(paths)` runs single Qwen2-Audio forward across N clips; per-row decode via attention_mask sums; ~5-8× throughput at batch 8. Tunable `--caption-batch-size` / `AIJOCKEY_CAPTION_BATCH`
+
+### Audio-aware Director wired into request path
+- Previously: `_call_qwen2audio` existed but `/generate` never passed audio paths → text Director only
+- Now: `server/api.py:566` and `app.py:105` pass `audio_clip_paths=[saved_paths]`; Director hears every user upload (capped at 6 internally, 30s window each)
+- `HF_DIRECTOR_MODEL` defaults to `Qwen/Qwen2-Audio-7B-Instruct` when audio paths present, else text Director
+
+### Model swaps (free OSS upgrades)
+| Component | Old | New | Effort | Knob |
+|-----------|-----|-----|--------|------|
+| Text Director default | `Qwen2.5-7B-Instruct` | **`Qwen3-8B-Instruct`** | 1 line | `HF_DIRECTOR_MODEL` |
+| Stem separator default | `htdemucs` | **`htdemucs_ft`** (~0.5 dB SDR cleaner) | 1 line | `AIJOCKEY_DEMUCS_MODEL` |
+
+### Recommended next swaps (not yet applied)
+| # | Swap | Effort | Reason |
+|---|------|--------|--------|
+| 1 | madmom → **Beat-This!** | ~30 lines | librosa fallback `downbeats=beats[::4]` is silently corrupting phrase quantize; joint beats+downbeats from transformer = direct fix to abruptness complaints |
+| 2 | htdemucs_ft → **BS-Roformer / Mel-Band Roformer** for vocals | ~80 lines | vocals SDR ~9 → ~11 dB; cleaner stem-swap + mashup; license MIT |
+| 3 | CLAP → **MuQ** for music similarity (retrieval only) | ~100 lines | MuQ Apache 2.0 (MERT is CC-BY-NC); marginal vs CLAP — defer until library retrieval matters |
+| 4 | Qwen2-Audio → **Qwen2.5-Omni-7B** | ~50 lines | only when audio Director becomes critical path |
+
+### New env knobs introduced this session
+```
+AIJOCKEY_STEM_WORKERS      1-4    (default 4)   parallel rubberband across stems
+AIJOCKEY_RENDER_WORKERS    1-8    (default 2)   parallel timeline-segment renders
+AIJOCKEY_DEMUCS_OVERLAP    0-0.5  (default 0.10) demucs window overlap
+AIJOCKEY_DEMUCS_MODEL      str    (default htdemucs_ft) demucs checkpoint
+AIJOCKEY_RB_COMBINED       0|1    (default 1)   single-call rubberband
+AIJOCKEY_RUBBERBAND_BIN    path   (default 'rubberband') CLI binary path
+AIJOCKEY_COMPILE_MODE      str    (default 'default') torch.compile mode
+AIJOCKEY_INT8              0|1    (default 0)   int8 inference (needs bnb-rocm)
+AIJOCKEY_BATCH_CLAP        0|1    (default 1)   S1 batched CLAP
+AIJOCKEY_CAPTION_BATCH     int    (default 8)   S3 caption batch size
+```
+
+### Architectural note — user/library mix direction
+Branch supports `use_library` boolean. Recommended UX evolution (not yet implemented):
+- Replace explicit ratio with semantic mode: `tight` / `balanced` / `exploratory`
+- Backend computes effective lib_count from `(mode, user_count, total_user_dur, target_duration)`
+- Hard floor: every user clip MUST appear in timeline at least once (planner reserved slots)
+- Library picks via CLAP-similarity to user pool centroid (style-RAG already plumbed)
+- Response telemetry: `clips_used: {user: N, library: M, library_ids: [...]}`
+
+`server/api.py` partially has `lib_count_for_mode()` helper. Wire to `mix_mode` form field next.
+
+### MI300X bring-up order (when moving to GPU)
+1. `rocm-smi` + `python -c "import torch; print(torch.cuda.is_available())"` — baseline
+2. `pip install -r requirements-rocm.txt`
+3. `python scripts/00_rocm_sanity.py` — must pass
+4. Smoke test: single `/generate` end-to-end on 3 user clips (forces audio Director download ~16GB first time)
+5. `pytest tests/` — regression
+6. Profile serial vs parallel (vary `AIJOCKEY_RENDER_WORKERS`); watch `rocm-smi` for VRAM headroom <80%
+7. Tune knobs (overlap, FLASH_ATTN, COMPILE)
+8. `bash scripts/pipeline_launch.sh` only after smoke passes
+9. Optional: ROCm flash-attn CK fork → `AIJOCKEY_FLASH_ATTN=2`; bnb-rocm → `AIJOCKEY_QLORA=1`
+
+---
 
 ## Phase A polish branch — completed before MI300X spin-up
 
