@@ -85,7 +85,7 @@ PRESETS = {
     "bollywood_block_party": dict(arc="build", prompt="bollywood club punjabi drill dancefloor"),
 }
 ARCS_FULL = ["build", "peak", "rollercoaster", "descend", "flat_high", "flat_low", "custom"]
-PHASE1_ARCS = ["build", "peak", "flat_low"]
+PHASE1_ARCS = ["build", "peak", "flat_low", "tomorrowland"]
 
 
 def _phase_arcs() -> list[str]:
@@ -672,6 +672,32 @@ def ready():
     return {"status": "ready", "disk_free_gb": disk_free_gb()}
 
 
+SAMPLE_CLIPS_DIR = ROOT / "user_set"
+
+
+@app.get("/sample_clips")
+def list_sample_clips():
+    """Return pre-staged user clips on the droplet (skip-upload speedup)."""
+    if not SAMPLE_CLIPS_DIR.exists():
+        return {"clips": []}
+    out = []
+    for p in sorted(SAMPLE_CLIPS_DIR.iterdir()):
+        if p.suffix.lower() not in ALLOWED_EXTS:
+            continue
+        try:
+            sz = p.stat().st_size
+            dur = audio_duration_seconds(p)
+        except Exception:
+            continue
+        out.append({
+            "id": p.name,
+            "name": p.stem,
+            "size_mb": round(sz / 1024 / 1024, 1),
+            "duration_sec": round(dur, 1),
+        })
+    return {"clips": out, "dir": str(SAMPLE_CLIPS_DIR)}
+
+
 @app.get("/preset_schema")
 def preset_schema():
     """Return frontend-renderable schemas for mode/vocals/style/advanced.
@@ -824,6 +850,9 @@ def _run_generate_sync(
     ingest_warnings: list[str] = []
 
     upload_map: list[dict] = []
+    # Filter out zero-byte sentinel placeholder (Space sends one when only
+    # sample_clip_ids selected, since FastAPI multipart requires ≥1 file part).
+    files_payload = [(n, d) for (n, d) in files_payload if d]
     for fname, data in files_payload:
         if not data:
             raise ValueError(f"empty file: {fname}")
@@ -1158,6 +1187,7 @@ async def generate(
     vocals: str = Form("on"),
     style: str | None = Form(None),
     advanced_json: str | None = Form(None),
+    sample_clip_ids: str | None = Form(None),
     x_key: str | None = Header(default=None, alias="X-Key"),
 ):
     global _concurrent_denied
@@ -1233,16 +1263,23 @@ async def generate(
     elif vocals_v == "on":
         instrumental_only = False
 
-    # Phase 1: min 3 clips. If user gave fewer, require library augmentation.
+    # Min-clips gate: count uploads + sample selections combined.
+    sample_n = 0
+    if sample_clip_ids and sample_clip_ids.strip():
+        sample_n = len([s for s in sample_clip_ids.split(",") if s.strip()])
+    total_clips = len(files) + sample_n
     min_clips = _min_clips()
-    if len(files) < min_clips and not use_library:
+    if total_clips < min_clips and not use_library:
         raise HTTPException(
             400,
-            detail=f"need at least {min_clips} clips OR use_library=true to "
-                   f"augment from preanalyzed pool (got {len(files)})",
+            detail=f"need at least {min_clips} clips (uploads + samples) OR "
+                   f"use_library=true to augment from preanalyzed pool "
+                   f"(got {total_clips})",
         )
-    if not (1 <= len(files) <= MAX_CLIPS):
-        raise HTTPException(400, detail=f"max {MAX_CLIPS} user clips")
+    if total_clips > MAX_CLIPS:
+        raise HTTPException(400, detail=f"max {MAX_CLIPS} clips total")
+    if total_clips < 1:
+        raise HTTPException(400, detail="upload at least 1 clip or pick a sample")
 
     # Acquire inflight slot. Multiple jobs may run concurrently
     # (cap: INFLIGHT_MAX). GPU stages serialize internally via _gpu_lock.
@@ -1265,6 +1302,28 @@ async def generate(
         files_payload: list[tuple[str, bytes]] = []
         for f in files:
             files_payload.append((f.filename or "clip.wav", await f.read()))
+        # Append pre-staged sample clips referenced by id (CSV string).
+        # Skips upload roundtrip; clips read from SAMPLE_CLIPS_DIR.
+        if sample_clip_ids and sample_clip_ids.strip():
+            ids = [s.strip() for s in sample_clip_ids.split(",") if s.strip()]
+            for cid in ids:
+                p = SAMPLE_CLIPS_DIR / cid
+                # Defend path traversal: must resolve under SAMPLE_CLIPS_DIR.
+                try:
+                    resolved = p.resolve()
+                    if not str(resolved).startswith(str(SAMPLE_CLIPS_DIR.resolve())):
+                        raise HTTPException(400, detail=f"sample_clip_id {cid!r} invalid")
+                except HTTPException:
+                    raise
+                except Exception:
+                    raise HTTPException(400, detail=f"sample_clip_id {cid!r} invalid")
+                if not p.exists():
+                    raise HTTPException(400, detail=f"sample clip not found: {cid}")
+                files_payload.append((cid, p.read_bytes()))
+        if not (1 <= len(files_payload) <= MAX_CLIPS):
+            raise HTTPException(400,
+                                 detail=f"need 1-{MAX_CLIPS} clips total "
+                                        f"(uploads + samples), got {len(files_payload)}")
 
         def _wrapped():
             # Stem-swap path already mutes vocals during overlaps; the
