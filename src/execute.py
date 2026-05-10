@@ -521,11 +521,13 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
                                min(cur_len, out_len) // 3)
     max_overlap_samples = min(max_overlap_samples, abs_cap_samples)
     overlap_n = min(int(bars * 4 * beat_dur * SR), max_overlap_samples)
-    actual_bars = overlap_n / max(bar_samples, 1)
-    if actual_bars < bars:
-        # Reflect the clamp into tech dict so downstream FX (riser length,
-        # accent placement) align with the real overlap window.
-        tech['bars_effective'] = round(actual_bars, 2)
+    # Critical: transition primitives (crossfade_transition, eq_swap_transition,
+    # etc.) recompute overlap from `bars` internally. We must shadow `bars`
+    # to the clamped value, otherwise they consume the full segment and
+    # output stops growing past the longest segment (STATUS bug #1).
+    bars = max(1, overlap_n // bar_samples)
+    if int(tech.get('bars', 16)) != bars:
+        tech['bars_effective'] = bars
     ramp = int(beat_dur * SR * 2)
     # Build vocal-suppressed cur for overlap-style transitions
     cur_no_intro_vox = dict(cur)
