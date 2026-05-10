@@ -66,6 +66,19 @@ def cmd_plan(args: argparse.Namespace) -> None:
         print(f"[director] arc={director_out.get('arc')} "
               f"prompt='{(director_out.get('text_prompt') or '')[:60]}' "
               f"tiers={len(director_out.get('transition_tiers') or [])}")
+        # Persist Director JSON next to output mix so S5 self-play /
+        # S7 DPO can reconstruct preference pairs as text.
+        try:
+            out_path = getattr(args, 'out', None) or getattr(args, 'output', None)
+            if out_path:
+                from pathlib import Path as _P
+                import json as _json
+                dpath = _P(out_path).parent / 'director.json'
+                dpath.parent.mkdir(parents=True, exist_ok=True)
+                with open(dpath, 'w') as _f:
+                    _json.dump(director_out, _f, indent=2)
+        except Exception as _e:
+            print(f"warn: could not save director.json ({_e})")
 
     arc_final = (director_out or {}).get('arc') or getattr(args, 'arc', 'build')
     prompt_final = (director_out or {}).get('text_prompt') or getattr(args, 'prompt', None)
@@ -171,6 +184,19 @@ def cmd_all(args: argparse.Namespace) -> None:
         print(f"[director] arc={director_out.get('arc')} "
               f"prompt='{(director_out.get('text_prompt') or '')[:60]}' "
               f"tiers={len(director_out.get('transition_tiers') or [])}")
+        # Persist Director JSON next to output mix so S5 self-play /
+        # S7 DPO can reconstruct preference pairs as text.
+        try:
+            out_path = getattr(args, 'out', None) or getattr(args, 'output', None)
+            if out_path:
+                from pathlib import Path as _P
+                import json as _json
+                dpath = _P(out_path).parent / 'director.json'
+                dpath.parent.mkdir(parents=True, exist_ok=True)
+                with open(dpath, 'w') as _f:
+                    _json.dump(director_out, _f, indent=2)
+        except Exception as _e:
+            print(f"warn: could not save director.json ({_e})")
 
     arc_final = (director_out or {}).get('arc') or getattr(args, 'arc', 'build')
     prompt_final = (director_out or {}).get('text_prompt') or getattr(args, 'prompt', None)

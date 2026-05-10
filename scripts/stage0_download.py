@@ -23,31 +23,118 @@ from pipeline.common import scratch_dir, write_json, atomic_write
 # Source URL listers
 # ---------------------------------------------------------------------------
 
-def _mixotic_urls(max_n: int) -> list[tuple[str, str]]:
-    """Mixotic.net CC-licensed DJ mixes. Public download URLs.
+def _http_get(url: str, timeout: int = 30) -> str | None:
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, headers={'User-Agent': 'aijockey/1.0'})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read().decode('utf-8', errors='ignore')
+    except Exception as e:
+        print(f"warn: GET {url} failed: {e}")
+        return None
 
-    Returns list of (url, suggested_filename). Real implementation should
-    scrape the catalog index page; this stub uses a known prefix pattern.
+
+def _mixotic_urls(max_n: int) -> list[tuple[str, str]]:
+    """Mixotic.net catalog scraper.
+
+    Catalog pattern observed: https://mixotic.net/mixes/?page=N (HTML index).
+    Per-mix page contains a `<a href=".../download/...mp3">` direct link.
+
+    We iterate index pages until max_n collected or pages exhausted. All
+    Mixotic content is Creative Commons (CC-BY-NC-SA), suitable for
+    research / fine-tune / non-commercial use. Production should still
+    verify per-mix license tag.
     """
-    # Known catalog uses sequential IDs at https://mixotic.net/mixes/####/
-    # Real download URL is fetched via per-mix page parse; deferred to
-    # an actual scraper. Stub returns empty list when offline.
-    return []
+    import re
+    out: list[tuple[str, str]] = []
+    page = 1
+    seen_mix_ids: set[str] = set()
+    while len(out) < max_n and page <= 50:
+        idx_url = f'https://mixotic.net/mixes/?page={page}'
+        html = _http_get(idx_url)
+        if not html:
+            break
+        # Find each mix link, e.g. /mixes/0712-FOO_BAR/
+        mix_paths = set(re.findall(r'/mixes/(\d{4}-[A-Za-z0-9_\-]+)/?', html))
+        if not mix_paths:
+            break
+        new_count = 0
+        for mp in sorted(mix_paths):
+            if mp in seen_mix_ids:
+                continue
+            seen_mix_ids.add(mp)
+            mix_url = f'https://mixotic.net/mixes/{mp}/'
+            mhtml = _http_get(mix_url)
+            if not mhtml:
+                continue
+            dl = re.search(r'href="([^"]+\.mp3)"', mhtml)
+            if not dl:
+                continue
+            url = dl.group(1)
+            if url.startswith('/'):
+                url = 'https://mixotic.net' + url
+            fname = mp + '.mp3'
+            out.append((url, fname))
+            new_count += 1
+            if len(out) >= max_n:
+                break
+        if new_count == 0:
+            break
+        page += 1
+    return out
 
 
 def _fma_urls(max_n: int, subset: str = 'medium') -> list[tuple[str, str]]:
-    """Free Music Archive bulk archive (zenodo or HF datasets).
+    """Free Music Archive bulk archive on Zenodo.
 
-    The archive on Zenodo is a single tar; we delegate to HF datasets
-    streaming if available rather than mirror the tar locally.
+    Single tar archive per subset. We download the tar and let stage1 walk
+    contents. Returns one (url, fname) per subset request.
     """
-    return []
+    archives = {
+        'small':  ('https://os.unil.cloud.switch.ch/fma/fma_small.zip',  'fma_small.zip'),
+        'medium': ('https://os.unil.cloud.switch.ch/fma/fma_medium.zip', 'fma_medium.zip'),
+        'large':  ('https://os.unil.cloud.switch.ch/fma/fma_large.zip',  'fma_large.zip'),
+    }
+    if subset not in archives:
+        return []
+    url, fname = archives[subset]
+    # max_n unused here — single archive, expanded in stage1.
+    return [(url, fname)]
 
 
 def _mtg_jamendo_urls(max_n: int, genre_filter: list[str] | None = None
                       ) -> list[tuple[str, str]]:
-    """MTG-Jamendo via HF datasets — streamed in S1, no S0 needed."""
-    return []
+    """MTG-Jamendo direct download.
+
+    Audio is hosted on Jamendo's CDN as 96kbps mp3 by track id. The track-id
+    list lives in the metadata TSV in the GitHub repo. We fetch that TSV,
+    sample the requested count, and emit per-track URLs.
+    """
+    import re
+    meta_url = ('https://raw.githubusercontent.com/MTG/mtg-jamendo-dataset/'
+                'master/data/autotagging.tsv')
+    txt = _http_get(meta_url)
+    if not txt:
+        return []
+    rows = txt.strip().split('\n')[1:]  # skip header
+    out: list[tuple[str, str]] = []
+    for row in rows:
+        cols = row.split('\t')
+        if len(cols) < 4:
+            continue
+        track_id = cols[0]
+        # Optional genre filter on tag column (cols[5+] are tag arrays in MTG)
+        if genre_filter:
+            tags = ' '.join(cols[5:]).lower()
+            if not any(g.lower() in tags for g in genre_filter):
+                continue
+        # CDN URL pattern: jamendo.com/track/<id>/download/mp3 (96k preview)
+        url = f'https://mp3l.jamendo.com/?trackid={track_id}&format=mp31'
+        fname = f'jamendo_{track_id}.mp3'
+        out.append((url, fname))
+        if len(out) >= max_n:
+            break
+    return out
 
 
 SOURCES = {

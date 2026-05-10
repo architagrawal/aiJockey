@@ -269,6 +269,17 @@ def _sanitize_out(raw: dict[str, Any], arc_fallback: str, user_prompt: str,
             beats = float(item.get("beats", 2.0))
             accents.append({"junction_index": ji, "fx_category": fx, "beats": beats})
 
+    # Phase 1: cap accents at 2 per junction to avoid pile-on. This matches
+    # the constitutional `accent_budget` rule and gives Director-level defense.
+    max_per_junction = 2 if os.environ.get("AIJOCKEY_PHASE", "1") == "1" else 4
+    by_junction: dict[int, list[dict[str, Any]]] = {}
+    for a in accents:
+        by_junction.setdefault(a["junction_index"], []).append(a)
+    capped: list[dict[str, Any]] = []
+    for ji in sorted(by_junction):
+        capped.extend(by_junction[ji][:max_per_junction])
+    accents = capped
+
     sg = raw.get("same_genre_tight_mix")
     if coherence_hint is not None and coherence_hint >= 0.72:
         sg = True
@@ -295,6 +306,7 @@ def run_director(
     max_transitions_hint: int | None = None,
     approx_duration_seconds: float = 600.0,
     audio_clip_paths: list[str] | None = None,
+    clips_meta: dict | None = None,
 ) -> dict[str, Any]:
     """
     Returns sanitized director dict compatible with PlannerConfig + apply_llm_transition_tiers.
@@ -320,17 +332,25 @@ def run_director(
             "Qwen/Qwen2.5-7B-Instruct",
         )
         is_audio_model = "audio" in model_id.lower() and audio_clip_paths
+        # Style-RAG: prepend retrieved real DJ examples as taste anchors.
+        rag_block = ""
+        try:
+            from style_rag import few_shot_block_for_director
+            rag_block = few_shot_block_for_director(clips_meta=clips_meta)
+        except Exception:
+            rag_block = ""
         llm_prompt = (
             f"User DJ request:\n{user_prompt}\n\n"
             f"Suggested arc preset: {arc_fb}\n"
             f"Clip pool size: {clip_count_estimate}, "
             f"produce transition_tiers of length exactly {mt}.\n"
+            + (rag_block if rag_block else "")
         )
         try:
             if is_audio_model:
                 out_text = _call_qwen2audio(llm_prompt, audio_clip_paths, model_id)
             else:
-                out_text = _call_hf_instruct(llm_prompt + "\n" + _system_prompt(), model_id)
+                out_text = _call_hf_instruct(llm_prompt, model_id)
             parsed = _extract_json_object(out_text or "")
             if parsed:
                 return _sanitize_out(parsed, arc_fb, user_prompt, mt, coherence_hint)
@@ -380,8 +400,7 @@ def _call_qwen2audio(user_message: str, audio_paths: list[str],
 
     if not audios:
         # No audio loaded — fall back to text path
-        return _call_hf_instruct(user_message + "\n" + _system_prompt(),
-                                 "Qwen/Qwen2.5-7B-Instruct")
+        return _call_hf_instruct(user_message, "Qwen/Qwen2.5-7B-Instruct")
 
     # Build conversation with one <audio> placeholder per clip
     user_content: list[dict] = []

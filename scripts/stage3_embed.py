@@ -70,20 +70,58 @@ def _maybe_load_caption_model():
     name = os.getenv('AIJOCKEY_CAPTION_MODEL', 'Qwen/Qwen2-Audio-7B-Instruct')
     qcfg = qlora_quant_config() if os.getenv('AIJOCKEY_CAPTION_72B') == '1' else None
     try:
-        proc = AutoProcessor.from_pretrained(name)
+        proc = AutoProcessor.from_pretrained(name, trust_remote_code=True)
         mdl = AutoModelForCausalLM.from_pretrained(
             name, quantization_config=qcfg, device_map='auto',
             attn_implementation=hf_attn_implementation(),
+            trust_remote_code=True,
         )
     except Exception as e:
         print(f"warn: caption model load failed ({e})")
         return None
 
     class _Captioner:
+        """Wraps Qwen2-Audio for clip-level captioning.
+
+        Loads first 30s of audio, asks model: 'Describe this music clip
+        for a DJ planning a mix. Mention genre, BPM band, mood, key
+        instruments, and any vocals.'
+        """
+
+        _PROMPT = (
+            "Describe this music clip for a DJ planning a mix. Mention "
+            "genre, BPM band, mood, key instruments, and any vocals. "
+            "Output 1 short sentence."
+        )
+
         def caption(self, path: str) -> str:
-            # Real impl prepares audio + prompt for Qwen2-Audio. Stub returns
-            # empty until pipeline is wired end-to-end.
-            return ''
+            try:
+                import torch
+                import librosa
+                wav, sr = librosa.load(path, sr=16000, mono=True, duration=30.0)
+                conv = [
+                    {"role": "user", "content": [
+                        {"type": "audio", "audio_url": path},
+                        {"type": "text",  "text": self._PROMPT},
+                    ]},
+                ]
+                text = proc.apply_chat_template(conv, add_generation_prompt=True,
+                                                  tokenize=False)
+                inputs = proc(text=text, audios=[wav], return_tensors='pt',
+                              padding=True, sampling_rate=sr)
+                inputs = {k: v.to(mdl.device) if hasattr(v, 'to') else v
+                          for k, v in inputs.items()}
+                with torch.no_grad():
+                    out_ids = mdl.generate(**inputs, max_new_tokens=80,
+                                            do_sample=False)
+                # Strip prompt prefix
+                gen = out_ids[:, inputs['input_ids'].size(1):]
+                resp = proc.batch_decode(gen, skip_special_tokens=True,
+                                          clean_up_tokenization_spaces=False)[0]
+                return resp.strip()
+            except Exception as e:
+                print(f"warn: caption {path} failed ({e})")
+                return ''
     return _Captioner()
 
 

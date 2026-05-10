@@ -2,3 +2,20 @@
 --index-url https://download.pytorch.org/whl/rocm6.0
 torch==2.3.1
 torchaudio==2.3.1
+
+# Training stack used by stage4 (critic), stage5 (self-play), stage7 (DPO/ORPO).
+# These are imported lazily (try/except) — without them the stages silently
+# degrade or no-op. Pin minimums known to work with transformers 4.43+.
+accelerate>=0.33.0
+peft>=0.11.0
+trl>=0.9.6
+datasets>=2.18.0
+lion-pytorch>=0.2.2
+
+# Notes for ROCm operators:
+# - bitsandbytes: NOT installed by default. Vanilla wheel is CUDA-only. To use
+#   AIJOCKEY_QLORA=1 or AIJOCKEY_INT8=1, install bitsandbytes-rocm or upstream
+#   multi-backend bitsandbytes (>=0.43) built against your ROCm version.
+# - flash-attn: NOT installed. AIJOCKEY_FLASH_ATTN defaults to 'sdpa' which
+#   uses aotriton on ROCm 6.0. Set AIJOCKEY_FLASH_ATTN=2 only after building
+#   a ROCm-compatible flash-attn (CK or triton fork).

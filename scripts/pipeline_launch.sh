@@ -25,16 +25,32 @@ for w in s0_download s1_analyze s2_segment s3_embed s4_critic s5_selfplay s7_dpo
 done
 
 PY="${PYTHON:-python}"
-ENV_PREFIX="AIJOCKEY_PHASE=1 AIJOCKEY_DTYPE=bfloat16 AIJOCKEY_COMPILE=1 AIJOCKEY_FLASH_ATTN=2 AIJOCKEY_OPTIMIZER=lion AIJOCKEY_PHRASE_QUANTIZE=1 AIJOCKEY_STEM_SWAP=1 AIJOCKEY_CONSTITUTIONAL=1 AIJOCKEY_SCRATCH=${SCRATCH}"
 
-tmux send-keys -t "${SESSION}:s0_download"  "${ENV_PREFIX} ${PY} scripts/stage0_download.py --src mixotic,fma_medium,mtg_jamendo --max-per-src 1000" C-m
-tmux send-keys -t "${SESSION}:s1_analyze"   "${ENV_PREFIX} ${PY} scripts/stage1_analyze.py --watch ${SCRATCH}/raw" C-m
-tmux send-keys -t "${SESSION}:s2_segment"   "${ENV_PREFIX} ${PY} scripts/stage2_segment.py --watch ${SCRATCH}/cache" C-m
-tmux send-keys -t "${SESSION}:s3_embed"     "${ENV_PREFIX} ${PY} scripts/stage3_embed.py --watch ${SCRATCH}/cache" C-m
-tmux send-keys -t "${SESSION}:s4_critic"    "${ENV_PREFIX} ${PY} scripts/stage4_critic.py --watch ${SCRATCH}/transitions --min-samples 200" C-m
-tmux send-keys -t "${SESSION}:s5_selfplay"  "${ENV_PREFIX} ${PY} scripts/stage5_selfplay.py --k 8" C-m
-tmux send-keys -t "${SESSION}:s7_dpo"       "${ENV_PREFIX} ${PY} scripts/stage7_dpo.py" C-m
-tmux send-keys -t "${SESSION}:s8_bridge"    "${ENV_PREFIX} ${PY} scripts/stage8_bridge.py" C-m
-tmux send-keys -t "${SESSION}:monitor"      "${PY} scripts/monitor.py" C-m
+# Common env for all pipeline stages. Use printf %q so paths-with-spaces
+# in SCRATCH or PY survive the round-trip through tmux send-keys.
+ENV_VARS=(
+    AIJOCKEY_PHASE=1
+    AIJOCKEY_DTYPE=bfloat16
+    AIJOCKEY_COMPILE=1
+    AIJOCKEY_FLASH_ATTN=1
+    AIJOCKEY_OPTIMIZER=lion
+    AIJOCKEY_PHRASE_QUANTIZE=1
+    AIJOCKEY_STEM_SWAP=1
+    AIJOCKEY_CONSTITUTIONAL=1
+    "AIJOCKEY_SCRATCH=$(printf %q "${SCRATCH}")"
+)
+ENV_PREFIX="${ENV_VARS[*]}"
+PY_Q="$(printf %q "${PY}")"
+SCRATCH_Q="$(printf %q "${SCRATCH}")"
+
+tmux send-keys -t "${SESSION}:s0_download"  "${ENV_PREFIX} ${PY_Q} scripts/stage0_download.py --src mixotic,fma_medium,mtg_jamendo --max-per-src 1000" C-m
+tmux send-keys -t "${SESSION}:s1_analyze"   "${ENV_PREFIX} ${PY_Q} scripts/stage1_analyze.py --watch ${SCRATCH_Q}/raw" C-m
+tmux send-keys -t "${SESSION}:s2_segment"   "${ENV_PREFIX} ${PY_Q} scripts/stage2_segment.py --watch ${SCRATCH_Q}/cache" C-m
+tmux send-keys -t "${SESSION}:s3_embed"     "${ENV_PREFIX} ${PY_Q} scripts/stage3_embed.py --watch ${SCRATCH_Q}/cache" C-m
+tmux send-keys -t "${SESSION}:s4_critic"    "${ENV_PREFIX} ${PY_Q} scripts/stage4_critic.py --watch ${SCRATCH_Q}/transitions --min-samples 200" C-m
+tmux send-keys -t "${SESSION}:s5_selfplay"  "${ENV_PREFIX} ${PY_Q} scripts/stage5_selfplay.py --k 8" C-m
+tmux send-keys -t "${SESSION}:s7_dpo"       "${ENV_PREFIX} ${PY_Q} scripts/stage7_dpo.py" C-m
+tmux send-keys -t "${SESSION}:s8_bridge"    "${ENV_PREFIX} ${PY_Q} scripts/stage8_bridge.py" C-m
+tmux send-keys -t "${SESSION}:monitor"      "${PY_Q} scripts/monitor.py" C-m
 
 echo "launched. attach: tmux attach -t ${SESSION}"

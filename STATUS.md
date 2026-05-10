@@ -1,7 +1,33 @@
 # AiJockey — Status, Progress, Plan, Bugs
 
 Snapshot of what works, what's broken, what's next.
-Last updated: 2026-05-09 (mid-session — AMD MI300X live).
+Last updated: 2026-05-09 (post Phase A polish branch — `best-output-pipeline`).
+
+## Phase A polish branch — completed before MI300X spin-up
+
+- **Foundation fixes**:
+  - Phrase quantization (planner-stage + execute-stage defense in depth) — [src/planner.py](src/planner.py), [src/execute.py](src/execute.py)
+  - Stem-additive overlap (eliminates phasey vocal-mute artifact, STATUS bug #6) — [src/execute.py](src/execute.py)
+  - Humanized accent FX (±8 ms timing jitter, ±8 % velocity, deterministic seed) — [src/execute.py](src/execute.py)
+  - Sample lib gating (PHASE1_ALLOWED_TYPES whitelist; meme/airhorn pollution removed) — [src/samples.py](src/samples.py)
+- **Phase 1 scope enforcement**:
+  - 3-tier vocab (`minor`/`major`/`drop`) — Director downgrades cut/loop to major
+  - 3 arc presets (`build`/`peak`/`flat_low`) — full vocab restored when AIJOCKEY_PHASE=2
+  - Director SYSTEM_PROMPT_PHASE1 with section-aware drop rule + accent budget
+  - Director-level accent cap (≤2 per junction)
+  - API: min 3 clips Phase 1, BPM-band post-analyze warning, instrumental_only=True default
+- **Hard musical rules**: [src/constitutional.py](src/constitutional.py) validator (phrase-grid, drop-section, breakdown-pair, bpm-drift, key-compat, accent-budget) + repair() downgrade. Wired into execute + N-best ranker.
+- **Style-RAG**: Director retrieves nearest CLAP-similar real DJ transitions from /scratch/embed index, prepends as in-context examples — [src/style_rag.py](src/style_rag.py)
+- **Efficiency hooks**: [src/training/efficiency.py](src/training/efficiency.py) — bf16, torch.compile, Flash-Attn 2, QLoRA, LoRA, Lion/Sophia/AdamW8bit, ORPO/DPO/KTO trainer factory, int8 inference. Retrofitted into analyze.py.
+- **Augmentation utils**: [src/training/augment.py](src/training/augment.py) — AugChain (pitch/stretch/gain/codec roundtrip), SpecAugment, mixup. ~5-10× effective dataset.
+- **Pipeline-parallel scripts (S0–S9 + monitor + launcher)**: [scripts/stage*.py](scripts/) — all stages have real bodies (no stubs). Mixotic + FMA + MTG-Jamendo URL listers, batch-mode analyze, novelty-curve transition segmentation, Qwen2-Audio captioner, CLAP-feature critic v2 with multi-task heads, K-render self-play with critic rerank, ORPO LoRA Director with director.json text pairs, MusicGen-Small bridge fine-tune with EnCodec recon loss, K=64 final batch render.
+- **Seed prompts**: [scripts/prompts/selfplay.json](scripts/prompts/) (30) + final.json (20) ready to feed S5/S9.
+- **Tests**: 14/14 torch-free unit tests pass (phrase quantize, constitutional, transition mapping Phase 1/2 vocab gates).
+- **Doc sync**: AGENTS.md tier vocab + 12 env vars; HACKATHON.md Slide 4 reflects current pipeline.
+
+Branch ready for MI300X. Pull with `git pull origin best-output-pipeline` then `bash scripts/pipeline_launch.sh`.
+
+---
 
 ---
 

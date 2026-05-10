@@ -50,13 +50,21 @@ def time_stretch(wav: np.ndarray, sr: int, rate: float) -> np.ndarray:
 
 def speed_perturb(wav: np.ndarray, sr: int, factor: float) -> tuple[np.ndarray, int]:
     """Resample-based speed change (alters both pitch + tempo).
-    Returns (audio, new_sr_for_alignment). For training we usually keep sr fixed
-    by post-resampling to the original sr; this returns the raw factored audio.
+    Returns (audio, sr) where audio has been resampled to factor*sr then
+    relabeled at the original sr — net effect is faster/slower playback
+    with pitch shift, length scaled by 1/factor.
     """
     if abs(factor - 1.0) < 0.005:
         return wav, sr
-    new_sr = int(sr * factor)
-    return wav, new_sr
+    try:
+        import librosa
+    except ImportError:
+        return wav, sr
+    target_sr = int(sr * factor)
+    # Last axis is time for both (T,) and (C, T) layouts.
+    y = librosa.resample(wav.astype(np.float32), orig_sr=sr, target_sr=target_sr,
+                         axis=-1)
+    return y.astype(np.float32), sr
 
 
 def gain_jitter(wav: np.ndarray, db: float) -> np.ndarray:

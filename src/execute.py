@@ -224,13 +224,20 @@ def _suppress_outro_vocals_stemwise(output: np.ndarray, prev: dict,
     inst_overlap = inst[:, -n_samples:]
     out[:, overlap_start:] = inst_overlap
     if ramp_out_samples > 0:
-        ramp_n = min(ramp_out_samples, overlap_start, inst.shape[1] - n_samples)
+        ramp_n = min(ramp_out_samples, overlap_start,
+                     max(0, inst.shape[1] - n_samples),
+                     max(0, vox.shape[1] - n_samples))
         if ramp_n > 0:
-            ramp = np.linspace(1.0, 0.0, ramp_n, dtype=np.float32)
-            ramp_start = overlap_start - ramp_n
             inst_pre = inst[:, -(n_samples + ramp_n):-n_samples]
             vox_pre = vox[:, -(n_samples + ramp_n):-n_samples]
-            out[:, ramp_start:overlap_start] = inst_pre + vox_pre * ramp
+            # Final length sanity — guard against any upstream stem-length skew.
+            ramp_n = min(ramp_n, inst_pre.shape[1], vox_pre.shape[1])
+            if ramp_n > 0:
+                ramp = np.linspace(1.0, 0.0, ramp_n, dtype=np.float32)
+                ramp_start = overlap_start - ramp_n
+                out[:, ramp_start:overlap_start] = (
+                    inst_pre[:, -ramp_n:] + vox_pre[:, -ramp_n:] * ramp
+                )
     return out
 
 
@@ -428,9 +435,9 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
         roll_at = max(0, out.shape[1] - cur['full'].shape[1] - int(4 * beat_dur * SR))
         return _done(T.overlay_sample(out, roll, roll_at, gain=0.4))
     if name == 'mashup':
-        inst = sum(v for k, v in prev['stems'].items() if k != 'vocals')
+        inst = _stem_sum(prev.get('stems') or {}, ('drums', 'bass', 'other'))
         in_vox = cur['stems'].get('vocals')
-        if in_vox is None or not hasattr(inst, 'shape'):
+        if in_vox is None or inst is None:
             return _done(T.crossfade_transition(output, cur['full'], SR, bars, beat_dur))
         n_overlay = int(bars * 4 * beat_dur * SR)
         body = output[:, :-n_overlay] if output.shape[1] > n_overlay else np.zeros((2, 0), dtype=np.float32)
@@ -438,9 +445,9 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
         return _done(T.mashup_transition(inst_tail, in_vox, cur['full'], SR, bars, beat_dur,
                                          out_full_remainder=body))
     if name == 'stem_swap':
-        inst = sum(v for k, v in prev['stems'].items() if k != 'vocals')
+        inst = _stem_sum(prev.get('stems') or {}, ('drums', 'bass', 'other'))
         in_vox = cur['stems'].get('vocals')
-        if in_vox is None:
+        if in_vox is None or inst is None:
             return _done(T.crossfade_transition(output, cur['full'], SR, bars, beat_dur))
         n_overlay = int(bars * 4 * beat_dur * SR)
         body = output[:, :-n_overlay] if output.shape[1] > n_overlay else np.zeros((2, 0), dtype=np.float32)

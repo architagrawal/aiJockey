@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from pipeline.common import scratch_dir
+from pipeline.common import scratch_dir, atomic_write
 
 
 MIN_PAIRS = 30
@@ -44,26 +44,57 @@ def _build_pairs_from_renders() -> int:
     renders = scratch_dir('renders')
     pref_dir = scratch_dir('preferences')
     out = pref_dir / 'iter_auto.jsonl'
-    new_pairs = []
+    # Read existing rows, dedupe against on-disk pair.json files, then
+    # rewrite the whole jsonl atomically. Atomic replace avoids the
+    # append-race with S5 writers (concurrent pair.json creation between
+    # our glob scan and append could otherwise produce duplicate rows).
+    existing: list[dict] = []
     seen_ids: set[str] = set()
     if out.exists():
         for line in out.read_text().splitlines():
             try:
-                seen_ids.add(json.loads(line)['prompt_id'])
+                row = json.loads(line)
             except Exception:
-                pass
+                continue
+            pid = row.get('prompt_id')
+            if pid in seen_ids:
+                continue
+            seen_ids.add(pid)
+            existing.append(row)
+    new_pairs: list[dict] = []
     for pjson in renders.glob('*/pair.json'):
         try:
             p = json.loads(pjson.read_text())
         except Exception:
             continue
-        if p.get('prompt_id') in seen_ids:
+        pid = p.get('prompt_id')
+        if pid in seen_ids:
             continue
+        # Read Director JSONs that produced each side of the pair so we
+        # have actual text targets for ORPO/DPO. S5 saves director.json
+        # next to mix.wav per render.
+        chosen_dir = Path(p.get('chosen_path', '')).parent
+        rejected_dir = Path(p.get('rejected_path', '')).parent
+        chosen_text = ''
+        rejected_text = ''
+        try:
+            cf = chosen_dir / 'director.json'
+            if cf.exists():
+                chosen_text = cf.read_text().strip()
+            rf = rejected_dir / 'director.json'
+            if rf.exists():
+                rejected_text = rf.read_text().strip()
+        except Exception:
+            pass
+        if chosen_text and rejected_text and chosen_text != rejected_text:
+            p['chosen'] = chosen_text
+            p['rejected'] = rejected_text
+        seen_ids.add(pid)
         new_pairs.append(p)
     if not new_pairs:
         return 0
-    with open(out, 'a') as f:
-        for p in new_pairs:
+    with atomic_write(out) as f:
+        for p in existing + new_pairs:
             f.write(json.dumps(p) + '\n')
     return len(new_pairs)
 

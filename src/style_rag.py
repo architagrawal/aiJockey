@@ -131,3 +131,107 @@ def build_pattern_from_clips(out_clip_meta: dict, out_clap: np.ndarray,
         'out_clip': out_clip_meta.get('clip_id', '?'),
         'in_clip': in_clip_meta.get('clip_id', '?'),
     }
+
+
+# ---------------------------------------------------------------------------
+# Pipeline-aware embed-index RAG (Phase A polish §14.2 P5 + §15.S3)
+#
+# Reads /scratch/embed/{clap.npy,clap_index.json,captions.json} that the
+# stage3_embed.py worker maintains live from the analyzed corpus. Director
+# feeds the result to its system-prompt few-shot block.
+# ---------------------------------------------------------------------------
+
+import os
+
+
+def _embed_root() -> Path:
+    return Path(os.environ.get('AIJOCKEY_SCRATCH', '/scratch')) / 'embed'
+
+
+def _load_pipeline_index() -> tuple[np.ndarray | None, dict[str, int], dict[str, str]]:
+    er = _embed_root()
+    vec_path = er / 'clap.npy'
+    idx_path = er / 'clap_index.json'
+    cap_path = er / 'captions.json'
+    if not vec_path.exists() or not idx_path.exists():
+        return None, {}, {}
+    try:
+        vecs = np.load(vec_path).astype(np.float32)
+        idx = json.loads(idx_path.read_text())
+        caps = json.loads(cap_path.read_text()) if cap_path.exists() else {}
+        return vecs, {k: int(v) for k, v in idx.items()}, caps
+    except Exception:
+        return None, {}, {}
+
+
+def query_pipeline_index(query_vec: np.ndarray, k: int = 3,
+                         exclude_ids: set[str] | None = None,
+                         ) -> list[dict]:
+    """Top-k cosine-similar items from the live pipeline embed index.
+
+    Returns list of {clip_id, score, caption}. Empty list if index missing.
+    """
+    vecs, idx, caps = _load_pipeline_index()
+    if vecs is None or vecs.size == 0 or not idx:
+        return []
+    excl = exclude_ids or set()
+    q = query_vec.astype(np.float32).reshape(-1)
+    qn = float(np.linalg.norm(q)) + 1e-9
+    vn = np.linalg.norm(vecs, axis=1) + 1e-9
+    sims = (vecs @ q) / (vn * qn)
+    inv = {v: k_ for k_, v in idx.items()}
+    order = np.argsort(-sims)
+    out: list[dict] = []
+    for j in order:
+        cid = inv.get(int(j), '?')
+        if cid in excl:
+            continue
+        out.append({
+            'clip_id': cid,
+            'score': float(sims[j]),
+            'caption': caps.get(cid, ''),
+        })
+        if len(out) >= k:
+            break
+    return out
+
+
+def query_centroid_from_clips(clips_meta: dict[str, dict]) -> np.ndarray | None:
+    """Average of pool clips' CLAP embeddings -> query vector for retrieval."""
+    arrs: list[np.ndarray] = []
+    for cm in clips_meta.values():
+        v = cm.get('clap_embedding')
+        if v is None:
+            continue
+        a = np.asarray(v, dtype=np.float32).reshape(-1)
+        if a.size:
+            arrs.append(a)
+    if not arrs:
+        return None
+    return np.mean(np.stack(arrs), axis=0)
+
+
+def few_shot_block_for_director(clips_meta: dict[str, dict] | None = None,
+                                 query_vec: np.ndarray | None = None,
+                                 k: int = 3) -> str:
+    """Render an in-context examples block to prepend to Director system prompt.
+
+    Empty string when AIJOCKEY_STYLE_RAG=0 or when index/captions are absent.
+    """
+    if os.environ.get('AIJOCKEY_STYLE_RAG', '1') == '0':
+        return ''
+    if query_vec is None and clips_meta is not None:
+        query_vec = query_centroid_from_clips(clips_meta)
+    if query_vec is None:
+        return ''
+    hits = query_pipeline_index(query_vec, k=k,
+                                 exclude_ids=set(clips_meta or {}))
+    if not hits:
+        return ''
+    lines = ['',
+             'Real DJ-set transitions retrieved as taste anchors '
+             '(use as reference, not as schema):']
+    for i, h in enumerate(hits, 1):
+        cap = (h.get('caption') or '<no caption>').strip()
+        lines.append(f'  [{i}] sim={h["score"]:.3f} | {cap}')
+    return '\n'.join(lines) + '\n'

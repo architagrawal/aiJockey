@@ -45,12 +45,20 @@ def autocast_ctx() -> Any:
 # ---------------------------------------------------------------------------
 
 def maybe_compile(model: torch.nn.Module,
-                  mode: str = 'reduce-overhead') -> torch.nn.Module:
-    """Wrap with torch.compile if AIJOCKEY_COMPILE=1 and torch>=2."""
+                  mode: str | None = None) -> torch.nn.Module:
+    """Wrap with torch.compile if AIJOCKEY_COMPILE=1 and torch>=2.
+
+    Mode default is 'default' — 'reduce-overhead' uses HIP graph capture
+    on ROCm which is less stable than NVIDIA CUDA graphs and hits eager
+    fallback frequently on dynamic shapes. Override with
+    AIJOCKEY_COMPILE_MODE=reduce-overhead|max-autotune when validated.
+    """
     if os.getenv('AIJOCKEY_COMPILE', '1') == '0':
         return model
     if not hasattr(torch, 'compile'):
         return model
+    if mode is None:
+        mode = os.getenv('AIJOCKEY_COMPILE_MODE', 'default')
     try:
         return torch.compile(model, mode=mode)
     except Exception as e:
@@ -60,14 +68,21 @@ def maybe_compile(model: torch.nn.Module,
 
 def hf_attn_implementation() -> str | None:
     """Value to pass as `attn_implementation=` to HF transformers `from_pretrained`.
-    Returns None if env requests default.
+
+    Default is 'sdpa' — works on ROCm via aotriton (PyTorch 2.3+ROCm 6.0+)
+    and on CUDA via FlashAttention/MemEff kernels. 'flash_attention_2' is
+    opt-in: stock `pip install flash-attn` does NOT build on ROCm and the
+    HF importer raises at model load when the wheel is missing.
+
+    Set AIJOCKEY_FLASH_ATTN=2 only after installing a ROCm-compatible
+    flash-attn wheel (CK or triton fork).
     """
-    v = os.getenv('AIJOCKEY_FLASH_ATTN', '2')
+    v = os.getenv('AIJOCKEY_FLASH_ATTN', '1')
     if v == '0':
         return 'eager'
-    if v == '1':
-        return 'sdpa'
-    return 'flash_attention_2'
+    if v == '2':
+        return 'flash_attention_2'
+    return 'sdpa'
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +177,14 @@ def preference_trainer(method: str = 'orpo'):
 
 def int8_quant_config():
     """8-bit weight quant for inference (Director per-junction). Halves
-    VRAM, ~2x speed on transformers attention."""
+    VRAM, ~2x speed on transformers attention.
+
+    Gated by AIJOCKEY_INT8 (default off). Vanilla bitsandbytes is
+    CUDA-only — on ROCm install bitsandbytes-rocm (or upstream multi-
+    backend ≥0.43) before enabling, otherwise model load raises.
+    """
+    if os.getenv('AIJOCKEY_INT8', '0') == '0':
+        return None
     try:
         from transformers import BitsAndBytesConfig
     except ImportError:

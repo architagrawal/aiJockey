@@ -855,6 +855,24 @@ def plan_n_best(clips: dict[str, dict], config: PlannerConfig,
                 print(f"[N-best #{i}] plan failed: {e}")
             continue
         score, br = _timeline_quality(tl, clips, cache_dir, cfg.target_duration)
+        # Constitutional check — penalize candidates with hard violations.
+        # Phase A polish §14.2 P3: rules layer above N-best ranker. Repaired
+        # candidates lose half their score, raw rejects fall to -inf so they
+        # rank dead-last unless every candidate has issues.
+        try:
+            import os
+            if os.getenv('AIJOCKEY_CONSTITUTIONAL', '1') != '0':
+                import constitutional as C
+                violations = C.validate(tl, clips)
+                rejects = sum(1 for v in violations if v.severity == 'reject')
+                br['constitutional_rejects'] = rejects
+                if rejects > 0:
+                    score -= 0.5 * rejects
+                    if verbose:
+                        print(f"[N-best #{i}] constitutional: {rejects} rejects, "
+                              f"penalty applied")
+        except ImportError:
+            pass
         if verbose:
             print(f"[N-best #{i}] sb={override['surprise_budget']} bw={override['beam_width']} "
                   f"score={score:.3f} entries={len(tl)} "

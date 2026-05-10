@@ -377,6 +377,30 @@ def _run_generate_sync(
     analyze_pool(str(pool_dir), str(cache_dir), device=AI_DEVICE, force=False, workers=min(4, len(saved_paths)))
     jlog(job_id, "analyze", (time.perf_counter() - t_an) * 1000, disk_gb=disk_free_gb())
 
+    # Phase A polish §1.3: BPM band check post-analyze. User-uploaded clips
+    # outside [BPM_MIN, BPM_MAX] are flagged as warnings (Phase 1 is tuned
+    # for 4-on-floor 100-135). We don't hard-reject so users get a graceful
+    # degraded mix instead of an error.
+    if os.environ.get("AIJOCKEY_PHASE", "1") == "1":
+        for sp in saved_paths:
+            cache_json = cache_dir / f"{sp.stem}.json"
+            if not cache_json.exists():
+                continue
+            try:
+                with open(cache_json) as f:
+                    cm = json.load(f)
+                bpm = float(cm.get("tempo", 0.0))
+            except Exception:
+                continue
+            if bpm <= 0:
+                continue
+            if not (BPM_MIN_PHASE1 <= bpm <= BPM_MAX_PHASE1):
+                msg = (f"{sp.name}: BPM {bpm:.0f} outside Phase 1 band "
+                       f"[{BPM_MIN_PHASE1:.0f}-{BPM_MAX_PHASE1:.0f}]; "
+                       f"transitions may sound off. Set AIJOCKEY_PHASE=2 to allow.")
+                ingest_warnings.append(msg)
+                jlog(job_id, "bpm_band_warn", clip=sp.name, bpm=bpm)
+
     if use_library:
         for lib_clip in library_clip_paths():
             link_or_copy(lib_clip, pool_dir / lib_clip.name)
@@ -408,6 +432,7 @@ def _run_generate_sync(
         coherence_hint=coherence,
         max_transitions_hint=estimate_max_transitions_for_pool(len(clips), float(duration)),
         approx_duration_seconds=float(duration),
+        clips_meta=clips,
     )
     final_prompt = director.get("text_prompt") or base_prompt
     final_arc = director.get("arc") or base_arc
@@ -546,22 +571,33 @@ async def generate(
             # instrumental_only toggle additionally suppresses vocals
             # throughout segment bodies. Implemented as env var read by
             # execute.py via the existing AIJOCKEY_STEM_SWAP path.
+            # _pipeline_lock guarantees only one job sets this env at a time;
+            # try/finally restores prior value so a crash can't leave the
+            # process permanently in instrumental-only mode.
+            _ENV_KEY = "AIJOCKEY_INSTRUMENTAL_ONLY"
+            _prev = os.environ.get(_ENV_KEY)
             if instrumental_only:
-                os.environ["AIJOCKEY_INSTRUMENTAL_ONLY"] = "1"
+                os.environ[_ENV_KEY] = "1"
             else:
-                os.environ.pop("AIJOCKEY_INSTRUMENTAL_ONLY", None)
-            return _run_generate_sync(
-                job_id=job_id,
-                preset=preset,
-                duration=duration,
-                files_payload=files_payload,
-                use_library=use_library,
-                prompt=prompt,
-                arc=arc,
-                seed=seed,
-                lufs=lufs,
-                export_format=ef,
-            )
+                os.environ.pop(_ENV_KEY, None)
+            try:
+                return _run_generate_sync(
+                    job_id=job_id,
+                    preset=preset,
+                    duration=duration,
+                    files_payload=files_payload,
+                    use_library=use_library,
+                    prompt=prompt,
+                    arc=arc,
+                    seed=seed,
+                    lufs=lufs,
+                    export_format=ef,
+                )
+            finally:
+                if _prev is None:
+                    os.environ.pop(_ENV_KEY, None)
+                else:
+                    os.environ[_ENV_KEY] = _prev
 
         try:
             artifact, timeline_path = await asyncio.wait_for(

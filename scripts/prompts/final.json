@@ -1,0 +1,22 @@
+[
+  {"id": "demo01", "prompt": "festival main stage euphoric drops big bass",      "arc": "peak",    "clips": "clips"},
+  {"id": "demo02", "prompt": "deep house sunset rooftop chill build",            "arc": "build",   "clips": "clips"},
+  {"id": "demo03", "prompt": "techno late night underground hypnotic",           "arc": "flat_low","clips": "clips"},
+  {"id": "demo04", "prompt": "melodic techno emotional rolling bassline",        "arc": "build",   "clips": "clips"},
+  {"id": "demo05", "prompt": "trance uplifting anthems peak time",               "arc": "peak",    "clips": "clips"},
+  {"id": "demo06", "prompt": "synthwave neon retrowave nostalgia",               "arc": "build",   "clips": "clips"},
+  {"id": "demo07", "prompt": "progressive house chill warmup",                   "arc": "build",   "clips": "clips"},
+  {"id": "demo08", "prompt": "tech-house club peak rolling groove",              "arc": "peak",    "clips": "clips"},
+  {"id": "demo09", "prompt": "lo-fi instrumental ambient evening",               "arc": "flat_low","clips": "clips"},
+  {"id": "demo10", "prompt": "future bass instrumental euphoric",                "arc": "peak",    "clips": "clips"},
+  {"id": "demo11", "prompt": "minimal techno drone hypnosis",                    "arc": "flat_low","clips": "clips"},
+  {"id": "demo12", "prompt": "afro house tribal groove sunrise",                 "arc": "build",   "clips": "clips"},
+  {"id": "demo13", "prompt": "melodic house emotional drops main stage",         "arc": "peak",    "clips": "clips"},
+  {"id": "demo14", "prompt": "deep techno warehouse late night",                 "arc": "build",   "clips": "clips"},
+  {"id": "demo15", "prompt": "drum and bass liquid roller smooth",               "arc": "build",   "clips": "clips"},
+  {"id": "demo16", "prompt": "ambient electronica calm meditative",              "arc": "flat_low","clips": "clips"},
+  {"id": "demo17", "prompt": "tech-house warmup groovy bassline",                "arc": "build",   "clips": "clips"},
+  {"id": "demo18", "prompt": "main stage festival anthems peak euphoria",        "arc": "peak",    "clips": "clips"},
+  {"id": "demo19", "prompt": "trance peak time euphoria emotional",              "arc": "peak",    "clips": "clips"},
+  {"id": "demo20", "prompt": "deep dub techno underground meditative",           "arc": "flat_low","clips": "clips"}
+]

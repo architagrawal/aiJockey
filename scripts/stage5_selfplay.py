@@ -26,27 +26,113 @@ PROMPTS_DEFAULT = scratch_dir('prompts') / 'list.json'
 RENDERS_ROOT = lambda: scratch_dir('renders')
 
 
-def _critic_score(audio_path: Path) -> float:
-    """Load latest critic v2 + score this render."""
+_CRITIC_CACHE = {'ckpt': None, 'model': None}
+_CLAP_CACHE = {'model': None}
+
+
+def _load_critic():
+    """Lazy-load + cache CriticV2 for repeated scoring calls."""
+    cps = sorted(scratch_dir('models').glob('critic_v2_e*.pt'))
+    if not cps:
+        return None
+    latest = cps[-1]
+    if _CRITIC_CACHE['ckpt'] == latest and _CRITIC_CACHE['model'] is not None:
+        return _CRITIC_CACHE['model']
     try:
         import torch
-        import torchaudio
-        cps = sorted(scratch_dir('models').glob('critic_v2_e*.pt'))
-        if not cps:
-            return 0.5  # uniform until critic exists
         from stage4_critic import CriticV2
-    except Exception:
-        return 0.5
-    try:
-        state = torch.load(cps[-1], map_location='cpu')
+        state = torch.load(latest, map_location='cpu')
         m = CriticV2()
         m.load_state_dict(state['model'])
         m.eval()
-    except Exception:
+        _CRITIC_CACHE['ckpt'] = latest
+        _CRITIC_CACHE['model'] = m
+        return m
+    except Exception as e:
+        print(f"warn: critic load failed ({e})")
+        return None
+
+
+def _load_clap():
+    if _CLAP_CACHE['model'] is not None:
+        return _CLAP_CACHE['model']
+    try:
+        from clap_wrapper import CLAP_Module
+        m = CLAP_Module(enable_fusion=False)
+        m.load_ckpt()
+        _CLAP_CACHE['model'] = m
+        return m
+    except Exception as e:
+        print(f"warn: CLAP load failed ({e})")
+        return None
+
+
+def _audio_to_clap_windows(audio_path: Path, n_windows: int = 5,
+                            window_sec: float = 8.0) -> list:
+    """Sample n equally-spaced windows of `audio_path`, embed each via CLAP.
+
+    Returns list of 512-vec numpy arrays.
+    """
+    try:
+        import numpy as np
+        import torchaudio
+        wav, sr = torchaudio.load(str(audio_path))
+        if wav.size(0) > 1:
+            wav = wav.mean(0, keepdim=True)
+        total = wav.size(1) / sr
+        if total < window_sec:
+            return []
+        starts = [(total - window_sec) * i / max(1, n_windows - 1)
+                  for i in range(n_windows)]
+        clap = _load_clap()
+        if clap is None:
+            return []
+        out = []
+        for st in starts:
+            s_idx = int(st * sr)
+            e_idx = s_idx + int(window_sec * sr)
+            seg = wav[:, s_idx:e_idx].numpy().astype(np.float32)
+            try:
+                emb = clap.get_audio_embedding_from_data(x=seg, use_tensor=False)
+                out.append(np.asarray(emb).reshape(-1)[:512])
+            except Exception:
+                continue
+        return out
+    except Exception as e:
+        print(f"warn: clap windows failed for {audio_path} ({e})")
+        return []
+
+
+def _critic_score(audio_path: Path) -> float:
+    """Score render via critic v2.
+
+    Steps:
+      1. Sample 5 CLAP windows from audio_path.
+      2. Build pre/trans/post triplet by triple-stacking each window's CLAP.
+      3. Run critic forward, sigmoid of `real` head.
+      4. Average across windows.
+
+    Returns 0.5 (uniform) when critic or CLAP missing — degrades gracefully
+    so self-play loop still produces preference pairs without strong critic.
+    """
+    if not audio_path.exists():
+        return 0.0
+    try:
+        import numpy as np
+        import torch
+    except ImportError:
+        return random.random()
+    critic = _load_critic()
+    if critic is None:
         return 0.5
-    # Real implementation: extract CLAP triplet over windows of audio_path,
-    # average critic real-prob across windows. Stub returns rng for now.
-    return random.random()
+    embs = _audio_to_clap_windows(audio_path)
+    if not embs:
+        return 0.5
+    feats = np.stack([np.concatenate([e, e, e]).astype(np.float32) for e in embs])
+    with torch.no_grad():
+        out = critic(torch.from_numpy(feats))
+        probs = torch.sigmoid(out['real']).cpu().numpy()
+    return float(np.mean(probs))
 
 
 def render_candidate(prompt_id: str, seed: int, k_idx: int,

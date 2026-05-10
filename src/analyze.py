@@ -54,6 +54,16 @@ class Analyzer:
         from clap_wrapper import CLAP_Module
         self.clap = CLAP_Module(enable_fusion=False)
         self.clap.load_ckpt()
+        # Phase A polish §16.2 efficiency hooks: bf16 + torch.compile.
+        # Demucs benefits substantially from compile on MI300X.
+        try:
+            from training.efficiency import maybe_compile, get_dtype
+            self._compute_dtype = get_dtype()
+            if self.device == 'cuda':
+                self.demucs = maybe_compile(self.demucs, mode='reduce-overhead')
+        except Exception as e:
+            print(f"[analyze] efficiency hooks skipped ({e})")
+            self._compute_dtype = torch.float32
         self.use_madmom = False
         try:
             import madmom

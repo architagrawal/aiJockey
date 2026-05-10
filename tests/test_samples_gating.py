@@ -38,10 +38,15 @@ def test_phase1_allows_dj_fx_types():
 
 def test_phase2_allows_all_types():
     os.environ["AIJOCKEY_PHASE"] = "2"
-    if "samples" in sys.modules:
-        del sys.modules["samples"]
+    for mod in ("samples", "synth_fx"):
+        if mod in sys.modules:
+            del sys.modules[mod]
     import samples
+    import synth_fx
+    # Precondition: airhorns must actually have a synth fallback. Without
+    # this assert, the test silently passes on environments missing it.
+    assert "airhorns" in synth_fx.SYNTHESIZERS, \
+        "test precondition: synth_fx.SYNTHESIZERS must contain 'airhorns'"
     bank = samples.SampleBank(samples_dir="samples")
-    # airhorns has a synth in synth_fx so should respond when ungated
     assert bank.has("airhorns")
     os.environ["AIJOCKEY_PHASE"] = "1"

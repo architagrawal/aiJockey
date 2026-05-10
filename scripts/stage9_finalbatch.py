@@ -94,8 +94,17 @@ def main() -> None:
     ap.add_argument('--k', type=int, default=int(os.getenv('AIJOCKEY_K', '64')))
     args = ap.parse_args()
     if not Path(args.prompts).exists():
-        print(f"S9 no prompts at {args.prompts}; nothing to do")
-        return
+        # Auto-bootstrap from the seed prompts shipped in repo. Lets users
+        # run the script immediately without curating prompts manually.
+        repo_seed = Path(__file__).resolve().parents[1] / 'scripts' / 'prompts' / 'final.json'
+        if repo_seed.exists():
+            print(f"S9 prompts file missing at {args.prompts}; "
+                  f"copying repo seed {repo_seed}")
+            Path(args.prompts).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.prompts).write_bytes(repo_seed.read_bytes())
+        else:
+            print(f"S9 no prompts at {args.prompts}; nothing to do")
+            return
     prompts = json.loads(Path(args.prompts).read_text())
     for entry in prompts:
         pid = entry.get('id') or entry.get('prompt_id')

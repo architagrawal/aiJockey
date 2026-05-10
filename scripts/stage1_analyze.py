@@ -46,37 +46,77 @@ def _is_done(audio_path: Path) -> bool:
     return cp.exists() and cp.stat().st_mtime >= audio_path.stat().st_mtime
 
 
+_ANALYZER_SINGLETON = None
+
+
+def _get_analyzer():
+    """Module-singleton Analyzer so we don't reload Demucs/CLAP per clip."""
+    global _ANALYZER_SINGLETON
+    if _ANALYZER_SINGLETON is None:
+        from analyze import Analyzer
+        _ANALYZER_SINGLETON = Analyzer(device=os.environ.get('AI_DEVICE', 'cuda'))
+    return _ANALYZER_SINGLETON
+
+
 def process_one(audio_path: Path) -> bool:
     """Run analyze pipeline on one file. Returns True on success."""
     cid = _clip_id(audio_path)
     if _is_done(audio_path):
         return True
     try:
-        # Lazy import — heavy deps only loaded once worker actually runs
-        from analyze import Analyzer
-    except ImportError as e:
-        print(f"err: cannot import analyze ({e})")
+        analyzer = _get_analyzer()
+    except Exception as e:
+        print(f"err: cannot init Analyzer ({e})")
         return False
     print(f"S1 analyze {audio_path.name} -> {cid}")
     try:
-        analyzer = Analyzer(stems_dir=str(scratch_dir('cache', 'stems')))
-        feat = analyzer.analyze(str(audio_path), clip_id=cid)
+        feat = analyzer.analyze_clip(str(audio_path), clip_id=cid,
+                                      cache_dir=str(scratch_dir('cache')))
+    except AttributeError:
+        # Fall back to module-level analyze_pool API for backward compat.
+        try:
+            from analyze import analyze_pool
+            analyze_pool(str(audio_path.parent),
+                         str(scratch_dir('cache')),
+                         device=os.environ.get('AI_DEVICE', 'cuda'),
+                         force=False, workers=1)
+            feat = None
+        except Exception as e:
+            print(f"warn: analyze_pool fallback failed for {audio_path}: {e}")
+            return False
     except Exception as e:
         print(f"warn: analyze failed for {audio_path}: {e}")
         return False
-    with atomic_write(_cache_path(cid)) as f:
-        import json
-        json.dump(feat.to_dict() if hasattr(feat, 'to_dict') else feat, f,
-                  indent=2, default=str)
+
+    if feat is not None:
+        with atomic_write(_cache_path(cid)) as f:
+            import json
+            json.dump(feat.to_dict() if hasattr(feat, 'to_dict') else feat, f,
+                      indent=2, default=str)
     return True
 
 
+def process_batch(audio_paths: list[Path]) -> int:
+    """Batch entry point. Currently delegates to process_one in a loop —
+    Demucs internal batching across multiple clips is non-trivial because
+    sources vary in length. Real batching would group equal-length chunks
+    and apply_model on stacks. Singleton analyzer at least avoids model
+    reload cost.
+    """
+    ok = 0
+    for p in audio_paths:
+        if process_one(p):
+            ok += 1
+    return ok
+
+
 def watch_loop(raw_root: Path, interval: float = 30.0,
-               extensions: tuple[str, ...] = ('.mp3', '.wav', '.flac', '.m4a', '.ogg')
+               extensions: tuple[str, ...] = ('.mp3', '.wav', '.flac', '.m4a', '.ogg'),
+               batch_size: int = 16,
                ) -> None:
-    print(f"S1 watching {raw_root} for new audio every {interval}s")
+    print(f"S1 watching {raw_root}, batch_size={batch_size}, every {interval}s")
     while True:
-        seen_any = False
+        pending: list[Path] = []
         if raw_root.exists():
             for fp in sorted(raw_root.rglob('*')):
                 if not fp.is_file():
@@ -85,9 +125,12 @@ def watch_loop(raw_root: Path, interval: float = 30.0,
                     continue
                 if _is_done(fp):
                     continue
-                process_one(fp)
-                seen_any = True
-        if not seen_any:
+                pending.append(fp)
+                if len(pending) >= batch_size:
+                    break
+        if pending:
+            process_batch(pending)
+        else:
             time.sleep(interval)
 
 

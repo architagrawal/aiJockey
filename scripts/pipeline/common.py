@@ -68,21 +68,28 @@ def watch(directory: Path, glob_pat: str = '*',
     `done_marker` is a function path -> path-of-done-marker. If marker
     exists, the file is considered already processed and skipped. The
     consumer is responsible for writing the marker after processing.
+
+    When `done_marker` is provided, the on-disk marker is the source of
+    truth — files are NOT added to the in-memory `seen` set after yield,
+    so a consumer crash mid-processing leaves the file eligible for
+    retry on the next poll. When no marker is provided, fall back to
+    in-memory `seen` (caller accepts that crashes drop the work).
     """
     seen: set[str] = set()
     while True:
         directory.mkdir(parents=True, exist_ok=True)
         for fp in sorted(directory.glob(glob_pat)):
             key = str(fp)
-            if key in seen:
-                continue
             if done_marker is not None:
                 marker = done_marker(fp)
                 if marker.exists():
-                    seen.add(key)
                     continue
-            yield fp
-            seen.add(key)
+                yield fp
+            else:
+                if key in seen:
+                    continue
+                yield fp
+                seen.add(key)
         time.sleep(interval_sec)
 
 
