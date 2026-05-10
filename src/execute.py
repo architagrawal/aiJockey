@@ -508,7 +508,20 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
     name = tech.get('name', 'crossfade')
     bars = int(tech.get('bars', 16))
     beat_dur = 60.0 / max(target_bpm, 1.0)
-    overlap_n = int(bars * 4 * beat_dur * SR)
+    # Clamp overlap to half of the SHORTER side (incoming OR outgoing tail).
+    # Without this, a 16-bar (~30s) overlap on a 2s segment over-consumes
+    # the audio and the rendered output collapses far below planned length
+    # (STATUS bug #1). Floor at 1 bar to keep transitions audible.
+    cur_len = cur['full'].shape[1]
+    out_len = output.shape[1]
+    max_overlap_samples = max(int(beat_dur * 4 * SR),  # 1 bar floor
+                               min(cur_len, out_len) // 2)
+    overlap_n = min(int(bars * 4 * beat_dur * SR), max_overlap_samples)
+    actual_bars = overlap_n / max(beat_dur * 4 * SR, 1)
+    if actual_bars < bars:
+        # Reflect the clamp into tech dict so downstream FX (riser length,
+        # accent placement) align with the real overlap window.
+        tech['bars_effective'] = round(actual_bars, 2)
     ramp = int(beat_dur * SR * 2)
     # Build vocal-suppressed cur for overlap-style transitions
     cur_no_intro_vox = dict(cur)
