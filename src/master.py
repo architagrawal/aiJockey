@@ -116,6 +116,13 @@ def master(in_path: str, out_path: str, target_lufs: float = -9.0) -> None:
     low = compress(low, threshold_db=-18, ratio=3.0, sr=sr)
     mid = compress(mid, threshold_db=-20, ratio=2.5, sr=sr)
     high = compress(high, threshold_db=-22, ratio=2.0, sr=sr)
+    # Tape saturation on mids — tanh asymmetric soft-clip adds 2nd/3rd
+    # harmonic warmth that Audiobox PQ rewards. Subtle drive (0.6) keeps
+    # transients intact. Disable: AIJOCKEY_MASTER_TAPE_SAT=0.
+    import os as _os
+    if _os.environ.get('AIJOCKEY_MASTER_TAPE_SAT', '1') != '0':
+        drive = float(_os.environ.get('AIJOCKEY_MASTER_TAPE_DRIVE', '0.6'))
+        mid = (np.tanh(mid * (1.0 + drive)) / (1.0 + drive * 0.3)).astype(np.float32)
     x = (low + mid + high).astype(np.float32)
 
     if np.isfinite(loud_early) and loud_early > -11.0:
