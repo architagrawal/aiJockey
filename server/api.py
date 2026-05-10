@@ -1230,6 +1230,32 @@ async def generate(
                         except Exception as _e:
                             jlog(job_id, "critic_skip", 0, err=str(_e)[:200])
 
+                        # Audiobox Aesthetics — Tier 1 C reference-free
+                        # quality scorer. 4 axes: PQ / PC / CE / CU.
+                        # Opt-in via AIJOCKEY_AUDIOBOX_AESTHETICS=1; degrades
+                        # silently when package missing or env off.
+                        try:
+                            from audiobox_aesthetics import (
+                                enabled as _aae_enabled,
+                                score as _aae_score,
+                                severity_proxy as _aae_sev,
+                            )
+                            if _aae_enabled():
+                                aae_t0 = time.perf_counter()
+                                aae = _aae_score(wav_for_probe)
+                                aae_ms = int((time.perf_counter() - aae_t0) * 1000)
+                                if aae:
+                                    sev = _aae_sev(aae)
+                                    headers["X-Audiobox"] = json.dumps(
+                                        {**{k: round(v, 2) for k, v in aae.items()},
+                                         "sev": round(sev, 3) if sev is not None else None,
+                                         "ms": aae_ms})[:300]
+                                    jlog(job_id, "audiobox", aae_ms,
+                                         pq=aae["PQ"], pc=aae["PC"],
+                                         ce=aae["CE"], cu=aae["CU"], sev=sev)
+                        except Exception as _e:
+                            jlog(job_id, "audiobox_skip", 0, err=str(_e)[:200])
+
                         # Per-render probe log → DPO data accumulator.
                         # Atomic JSONL append at $AIJOCKEY_PROBE_LOG (default
                         # /scratch/probes/log.jsonl). Captures Director plan,
