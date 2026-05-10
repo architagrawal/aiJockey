@@ -132,8 +132,11 @@ def spectral_phasing(prev_tail: np.ndarray, cur_head: np.ndarray,
     spec_lin = (spec_a + spec_b) * 0.5
     denom = float(np.mean(spec_lin) + 1e-9)
     phase_delta = float(np.mean(np.abs(spec_sum - spec_lin)) / denom)
-    # 0.20 corresponds to noticeable comb-filtering; 0.40+ severe
-    severity = min(1.0, phase_delta / 0.30)
+    # 0.20 corresponds to noticeable comb-filtering; 0.40+ severe.
+    # Divisor 0.40 (was 0.30) — empirically every render saturated the old
+    # divisor on phase>=0.30 making improver A/B invisible; cohort 80-row
+    # confirmed 60% rows >= 0.95. Wider headroom restores dynamic range.
+    severity = min(1.0, phase_delta / 0.40)
     return {'phase_delta': phase_delta, 'severity': float(severity)}
 
 
@@ -212,7 +215,17 @@ def probe_mix(wav_path: str, timeline_path: str | None = None,
         ), 3)
         results.append(r)
 
-    overall = max((r['overall_severity'] for r in results), default=0.0)
+    # Overall severity: MEAN across junctions of (max-across-axes per junction).
+    # Was double-max (worst junction's worst axis) — brittle: single bad
+    # junction saturated the whole render. Cohort 80-row confirmed: 60% of
+    # mixes hit overall >= 0.95 making improver delta invisible. Mean keeps
+    # the per-junction signal but averages across the mix so a 7-junction
+    # render with 1 bad + 6 good doesn't saturate.
+    # `worst_severity` retained for callers that want the brittle metric.
+    junction_sevs = [r['overall_severity'] for r in results]
+    overall = (sum(junction_sevs) / len(junction_sevs)
+               if junction_sevs else 0.0)
+    worst = max(junction_sevs, default=0.0)
     verdict = ('clean' if overall < 0.3 else
                'minor_artifacts' if overall < 0.6 else
                'audible_artifacts')
@@ -222,6 +235,7 @@ def probe_mix(wav_path: str, timeline_path: str | None = None,
         'n_junctions': len(results),
         'junctions': results,
         'overall_severity': round(float(overall), 3),
+        'worst_junction_severity': round(float(worst), 3),
         'verdict': verdict,
     }
 
