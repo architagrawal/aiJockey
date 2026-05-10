@@ -147,7 +147,45 @@ def cmd_plan(args: argparse.Namespace) -> None:
 
 def cmd_execute(args: argparse.Namespace) -> None:
     from execute import execute
+    import time as _time
+    _t0 = _time.perf_counter()
     execute(args.timeline, args.cache, args.out, args.samples)
+    _render_s = round(_time.perf_counter() - _t0, 2)
+    # Per-render probe + log: every CLI render appends to the probe JSONL,
+    # building baseline distribution before improver A/B. Disabled when
+    # --no_probe_log set (e.g. in CI/tests). Probe failures never break.
+    if not getattr(args, 'no_probe_log', False):
+        try:
+            import json as _json
+            from audio_probes import probe_mix
+            from probe_log import log_render
+            probe = probe_mix(args.out, args.timeline)
+            tl_blob = {}
+            try:
+                with open(args.timeline) as _tf:
+                    tl_blob = _json.load(_tf)
+            except Exception:
+                tl_blob = {}
+            director_blob = (tl_blob.get('meta', {}).get('director') or {}) \
+                if isinstance(tl_blob, dict) else {}
+            log_render(
+                job_id=f'cli_{int(_t0)}',
+                prompt=(tl_blob.get('meta', {}) or {}).get('prompt'),
+                arc=director_blob.get('arc'),
+                mix_mode=(tl_blob.get('meta', {}) or {}).get('mix_mode'),
+                duration_actual_s=probe.get('duration_sec'),
+                director_used=bool(director_blob),
+                director_fallback=bool(director_blob.get('_fallback')),
+                set_narrative=director_blob.get('set_narrative'),
+                transition_tiers=director_blob.get('transition_tiers'),
+                transition_intents=director_blob.get('transition_intents'),
+                render_time_s=_render_s,
+                probe=probe,
+            )
+            print(f"[probe] severity={probe['overall_severity']:.2f} "
+                  f"verdict={probe['verdict']} → logged")
+        except Exception as e:
+            print(f"[probe] log skipped ({e})")
     # Optional probe + improve pass: render → probe → diagnose → mutate
     # → re-render touched segments. Cap retries at args.improve_max_passes
     # (default 1) to avoid infinite loops.
@@ -400,6 +438,8 @@ def main() -> None:
                    help='Probe→improver passes after initial render (0=off, 1+ enable)')
     p.add_argument('--improve_threshold', type=float, default=0.5,
                    help='Stop when overall_severity below this')
+    p.add_argument('--no_probe_log', action='store_true',
+                   help='Disable per-render probe JSONL logging')
     p.set_defaults(func=cmd_execute)
 
     p = sub.add_parser('master')

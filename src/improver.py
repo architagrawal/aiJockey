@@ -17,6 +17,12 @@ Returns a `TimelineEdit` list — caller applies edits to the timeline JSON
 then re-runs execute on affected segments. Cascade rule: changing entry N
 invalidates transitions N-1→N AND N→N+1.
 
+Action gating (for A/B isolation — coupled changes hide attribution):
+  AIJOCKEY_IMPROVER_ENERGY    1|0  default 1   energy_repick action
+  AIJOCKEY_IMPROVER_OVERLAP   1|0  default 1   shorten_overlap action
+  AIJOCKEY_IMPROVER_SWAP      1|0  default 1   swap_transition action
+Set the others to 0 when validating one lever's effect on probe severity.
+
 This is the foundation for the probe → DPO preference loop: every applied
 edit becomes a (before, after, probe_delta) triple for S7 training.
 """
@@ -78,11 +84,26 @@ class ImproverReport:
         }
 
 
+def _action_enabled(action: str) -> bool:
+    """Per-action env gate for A/B isolation."""
+    import os
+    key = {
+        'energy_repick': 'AIJOCKEY_IMPROVER_ENERGY',
+        'shorten_overlap': 'AIJOCKEY_IMPROVER_OVERLAP',
+        'swap_transition': 'AIJOCKEY_IMPROVER_SWAP',
+    }.get(action)
+    if not key:
+        return True
+    return os.environ.get(key, '1') != '0'
+
+
 def diagnose_junction(probe_row: dict) -> list[tuple[str, str]]:
     """Return [(action, rationale), ...] for a single probe junction.
 
     Empty list = no actionable issue. Multiple issues at one junction
-    are returned in priority order (most-fixable first).
+    are returned in priority order (most-fixable first). Actions disabled
+    via env (AIJOCKEY_IMPROVER_*) are filtered out at the source so caller
+    edit counts reflect the active subset only.
     """
     out: list[tuple[str, str]] = []
     rms = probe_row.get('rms') or {}
@@ -97,17 +118,20 @@ def diagnose_junction(probe_row: dict) -> list[tuple[str, str]]:
     phase_sev = float(phase.get('severity', 0.0))
 
     # Vocal bleed first — easiest to fix (just swap transition technique).
-    if bleed_sev >= _SEVERITY_FLOOR and abs(bleed_xc) >= _VOCAL_BLEED_THRESHOLD:
+    if (bleed_sev >= _SEVERITY_FLOOR and abs(bleed_xc) >= _VOCAL_BLEED_THRESHOLD
+            and _action_enabled('swap_transition')):
         out.append(('swap_transition',
                     f'vocal_bleed xcorr={bleed_xc:+.2f} → vocal-suppress technique'))
 
     # Phase cancellation — shorten overlap to reduce constructive collision window.
-    if phase_sev >= _SEVERITY_FLOOR and phase_d >= _PHASE_THRESHOLD:
+    if (phase_sev >= _SEVERITY_FLOOR and phase_d >= _PHASE_THRESHOLD
+            and _action_enabled('shorten_overlap')):
         out.append(('shorten_overlap',
                     f'phase_delta={phase_d:.2f} → halve overlap bars'))
 
     # Energy mismatch — biggest hammer, requires planner re-pick.
-    if rms_sev >= _SEVERITY_FLOOR and abs(db_diff) >= _RMS_DB_THRESHOLD:
+    if (rms_sev >= _SEVERITY_FLOOR and abs(db_diff) >= _RMS_DB_THRESHOLD
+            and _action_enabled('energy_repick')):
         direction = 'higher' if db_diff > 0 else 'lower'
         out.append(('energy_repick',
                     f'db_diff={db_diff:+.2f} → re-pick segment with {direction} starting energy'))

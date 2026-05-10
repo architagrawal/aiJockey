@@ -1086,6 +1086,42 @@ async def generate(
                         jlog(job_id, "probe", probe_ms,
                              verdict=probe["verdict"],
                              severity=probe["overall_severity"])
+
+                        # Per-render probe log → DPO data accumulator.
+                        # Atomic JSONL append at $AIJOCKEY_PROBE_LOG (default
+                        # /scratch/probes/log.jsonl). Captures Director plan,
+                        # tier choices, probe scores, render time per call.
+                        # Foundation for self-improving Director (S5/S7 DPO).
+                        try:
+                            from probe_log import log_render
+                            director_blob = (tl_blob.get("meta", {})
+                                             .get("director") or {})
+                            log_render(
+                                job_id=job_id,
+                                prompt=tl_blob.get("meta", {}).get("prompt"),
+                                arc=director_blob.get("arc"),
+                                mix_mode=mode,
+                                duration_target_s=tl_blob.get("meta", {})
+                                                  .get("target_duration"),
+                                duration_actual_s=probe.get("duration_sec"),
+                                n_user_clips=len(user_ids),
+                                n_library_clips=len(lib_ids),
+                                director_used=bool(director_blob),
+                                director_fallback=bool(
+                                    director_blob.get("_fallback")),
+                                set_narrative=director_blob.get("set_narrative"),
+                                transition_tiers=director_blob.get(
+                                    "transition_tiers"),
+                                transition_intents=director_blob.get(
+                                    "transition_intents"),
+                                beat_source=tl_blob.get("meta", {})
+                                            .get("beat_source"),
+                                render_time_s=round(
+                                    (time.perf_counter() - t_wall), 2),
+                                probe=probe,
+                            )
+                        except Exception as _e:
+                            jlog(job_id, "probe_log_skip", 0, err=str(_e)[:200])
                 except Exception as e:
                     # Probes are advisory — never fail the response on probe errors.
                     jlog(job_id, "probe_skip", 0, err=str(e)[:200])
