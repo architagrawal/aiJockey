@@ -107,60 +107,76 @@ Output:
 """
 
 
-SYSTEM_PROMPT_PHASE1 = """You are a club DJ planning a tightly-mixed offline set. Output ONLY valid JSON, no markdown, no commentary.
+SYSTEM_PROMPT_PHASE1 = """You are a club DJ planning a tightly-mixed offline set with the user's exact clip pool. Output ONLY valid JSON, no markdown, no commentary.
 
-Restricted vocabulary — Phase 1 quality-first mode:
+You will be shown the POOL INVENTORY (what clips are available, their genre, BPM, section, energy). Your job is to design a SET NARRATIVE that uses the pool intelligently. Every choice must serve the narrative.
 
-Three transition tiers ONLY (no cut, no loop):
-- "minor": smooth EQ swap or volume crossfade over 8-16 bars. Use as the workhorse.
-- "major": structurally significant — filter_fade (filter sweep crossfade), drum_break (4-bar drum-only bridge), or echo_out (delay tail mask). Pick a different DSP per major junction.
-- "drop":  build_riser_drop ONLY. ENGINEER A CLIMAX. Riser/snare-roll on outgoing's last 8 bars, kick removed last 2, incoming drops on the 1.
+WORKFLOW (think this way before emitting JSON):
+  1. Read pool inventory. Identify clusters (techno block, chill block, etc).
+  2. Pick a SET NARRATIVE — a 1-sentence story for the set.
+     Examples: "warmup ambient → build to tech-house peak → cooldown lofi"
+              "all-night techno hypnosis at 124 bpm"
+              "disco surprise sandwiched in a deep-house build"
+  3. Pick arc + tiers + accents that SERVE the narrative.
+  4. Annotate each junction with INTENT: why are you using this transition here?
 
-DROP TIER HARD RULE: only when BOTH outgoing exit section AND incoming entry section are drop-compatible (drop, hook, peak). NEVER pick "drop" if either side is breakdown, intro, or outro — that's an energy crater. If unsure, pick "major".
+TRANSITION TIERS (Phase 1 — no cut, no loop):
+- "minor": smooth EQ swap / crossfade over 8-16 bars. Workhorse, low drama.
+- "major": structurally significant — filter_fade, drum_break, or echo_out. Use to mark NEW SECTION of the set narrative.
+- "drop":  build_riser_drop. Engineer a climax. ONLY when both sides are drop-compatible (drop/hook/peak). NEVER over breakdown/intro/outro — that's an energy crater. If your pool has no drop-section clips, pick zero drop tiers.
 
-Tier distribution by arc:
-- "build"   : 70% minor, 25% major spread evenly, exactly 1 drop near the end.
-- "peak"    : 50% minor, 35% major, 1-2 drops mid-set.
-- "flat_low": all minor, no major or drop. After-hours / lo-fi feel.
+JUNCTION INTENT (tag each junction with WHY):
+- "breath"          : low-energy bridge between dense moments
+- "build_tension"   : ramp up before something bigger (often before "drop_payoff")
+- "drop_payoff"     : climax landing — pair with drop tier
+- "genre_jump"      : intentional jump to new cluster — pair with major tier
+- "callback"        : deliberate return to earlier vibe
+- "smooth_continue" : keep groove rolling — pair with minor tier
+- "cooldown"        : energy descend toward set end
 
-Accent hints — overlay short FX at specific junctions. Cap at 2 accents per junction.
-- "risers"      : 4-8 beat sweep BEFORE a drop or major moment
-- "impacts"     : 1-beat boom AT a drop landing
-- "snare_rolls" : 2-4 beat snare buildup before a drop
-- "sweeps"      : 4-bar filter sweep during a major filter_fade
-- "hihat_rolls" : 1-2 beat tension lift during eq_swap on energy lifts
-- "sub_drops"   : 1-2 beat sub bass drop at major or drop landing
+CONSTRAINTS:
+- arc: only "build", "peak", "flat_low".
+- tier distribution by arc:
+    build:    70% minor, 25% major, ≤1 drop near end (only if pool supports)
+    peak:     50% minor, 35% major, 1-2 drops (only if pool supports)
+    flat_low: all minor. No major. No drop.
+- accents: cap 2 per junction. Use on major/drop tier only.
+  Categories: risers, impacts, snare_rolls, sweeps, hihat_rolls, sub_drops
+- Prefer NO accent over a forced one.
+- If pool is too disparate (low coherence, no clusters), say so in `narrative_notes` and use mostly minor tiers — admit limitation rather than fake drama.
 
-Prefer NO accent over a forced one. Use accents on `major` and `drop` tier junctions, not on `minor`.
-
-Allowed arcs (Phase 1): build, peak, flat_low.
-
-Schema (EXACT keys, no extras):
+OUTPUT SCHEMA (EXACT keys, no extras):
 {
   "arc": "build|peak|flat_low",
-  "text_prompt": "<short vibe sentence>",
+  "set_narrative": "<one-sentence story for the whole set>",
+  "narrative_notes": "<optional: caveats about pool coherence, what you're working around>",
+  "text_prompt": "<short vibe sentence echoing user request>",
   "surprise_budget": <int 0-10>,
   "callback_budget": <int 0-3>,
   "transition_tiers": ["minor","major","drop",...],
+  "transition_intents": ["breath","build_tension","drop_payoff","genre_jump","callback","smooth_continue","cooldown",...],
   "accent_hints": [ {"junction_index": 0, "fx_category": "risers|impacts|snare_rolls|sweeps|hihat_rolls|sub_drops", "beats": 4.0} ],
   "same_genre_tight_mix": false
 }
 
-junction_index = 0 means between clip 1 and clip 2.
+junction_index = 0 means between clip 1 and clip 2. transition_intents has same length as transition_tiers.
 
-Examples:
+EXAMPLES (showing reasoning style):
 
-User: "festival peak time, big drops, anthemic" with 5 transitions
+Pool: 8 tech-house clips at 122-126 BPM (drop sections present), 2 ambient at 90 BPM
+User: "warmup into peak"
 Output:
-{"arc":"peak","text_prompt":"festival peak euphoric","surprise_budget":3,"callback_budget":1,"transition_tiers":["minor","drop","major","drop","major"],"accent_hints":[{"junction_index":1,"fx_category":"risers","beats":8.0},{"junction_index":1,"fx_category":"impacts","beats":1.0},{"junction_index":3,"fx_category":"snare_rolls","beats":4.0}],"same_genre_tight_mix":false}
+{"arc":"build","set_narrative":"open with ambient breath, build through tech-house grooves, peak with a drop","narrative_notes":"pool has tight tech-house cluster + 2 ambient; using ambient as opener only","text_prompt":"warmup into peak time","surprise_budget":2,"callback_budget":0,"transition_tiers":["minor","minor","major","minor","major","drop"],"transition_intents":["breath","smooth_continue","genre_jump","smooth_continue","build_tension","drop_payoff"],"accent_hints":[{"junction_index":4,"fx_category":"risers","beats":8.0},{"junction_index":5,"fx_category":"impacts","beats":1.0}],"same_genre_tight_mix":true}
 
-User: "after-hours noir, smoky melancholy" with 4 transitions
+Pool: 12 disparate clips (cinematic, lofi, dnb, disco, future_bass, ambient) — coherence 0.4
+User: "festival peak"
 Output:
-{"arc":"flat_low","text_prompt":"after-hours lo-fi","surprise_budget":1,"callback_budget":0,"transition_tiers":["minor","minor","minor","minor"],"accent_hints":[],"same_genre_tight_mix":true}
+{"arc":"build","set_narrative":"navigate disparate pool as a curated journey rather than forcing peak","narrative_notes":"pool too disparate for festival-peak feel; mixing as warmup-style journey, no drops","text_prompt":"genre journey","surprise_budget":4,"callback_budget":0,"transition_tiers":["minor","major","minor","major","minor","minor"],"transition_intents":["breath","genre_jump","smooth_continue","genre_jump","smooth_continue","cooldown"],"accent_hints":[],"same_genre_tight_mix":false}
 
-User: "build warmup into peak" with 6 transitions
+Pool: 5 lofi clips at 80-90 BPM
+User: "after-hours"
 Output:
-{"arc":"build","text_prompt":"warmup into peak","surprise_budget":2,"callback_budget":1,"transition_tiers":["minor","minor","major","minor","major","drop"],"accent_hints":[{"junction_index":5,"fx_category":"risers","beats":8.0},{"junction_index":5,"fx_category":"impacts","beats":1.0}],"same_genre_tight_mix":false}
+{"arc":"flat_low","set_narrative":"sustained lo-fi ambient hypnosis","narrative_notes":"pool is tight lofi cluster — no major/drop needed, all minor blends","text_prompt":"after-hours lofi","surprise_budget":1,"callback_budget":0,"transition_tiers":["minor","minor","minor","minor"],"transition_intents":["breath","smooth_continue","smooth_continue","cooldown"],"accent_hints":[],"same_genre_tight_mix":true}
 """
 
 
@@ -196,9 +212,22 @@ def _fallback_director(user_prompt: str, arc_fallback: str, max_transitions: int
     tiers = ["minor"] * max(1, max_transitions)
     if len(tiers) > 4 and len(tiers) // 8 > 0:
         tiers[len(tiers) // 4] = "major"
+    intents = []
+    for i, t in enumerate(tiers):
+        if i == 0:
+            intents.append("breath")
+        elif i == len(tiers) - 1:
+            intents.append("cooldown")
+        elif t == "major":
+            intents.append("genre_jump")
+        else:
+            intents.append("smooth_continue")
     return {
         "arc": arc,
         "text_prompt": user_prompt.strip() or "club mix, cohesive energy",
+        "set_narrative": "deterministic fallback: minor blends with one mid-set major",
+        "narrative_notes": "Director LLM unavailable; using rule-based plan",
+        "transition_intents": intents,
         "surprise_budget": 10,
         "callback_budget": 1,
         "transition_tiers": tiers[:max_transitions],
@@ -286,12 +315,40 @@ def _sanitize_out(raw: dict[str, Any], arc_fallback: str, user_prompt: str,
     elif not isinstance(sg, bool):
         sg = False
 
+    # Narrative + per-junction intents (Phase A polish: "no character" fix).
+    set_narrative = raw.get("set_narrative")
+    if not isinstance(set_narrative, str) or not set_narrative.strip():
+        set_narrative = f"sequence {len(tiers)} clips guided by '{text_prompt}'"
+    narrative_notes = raw.get("narrative_notes") or ""
+    if not isinstance(narrative_notes, str):
+        narrative_notes = ""
+
+    ALLOWED_INTENTS = {
+        "breath", "build_tension", "drop_payoff", "genre_jump",
+        "callback", "smooth_continue", "cooldown",
+    }
+    intents_in = raw.get("transition_intents") or []
+    intents: list[str] = []
+    if isinstance(intents_in, list):
+        for x in intents_in:
+            tx = str(x).lower().strip()
+            intents.append(tx if tx in ALLOWED_INTENTS else "smooth_continue")
+    while len(intents) < len(tiers):
+        # Default intent infers from tier
+        t = tiers[len(intents)]
+        intents.append({"drop": "drop_payoff", "major": "genre_jump",
+                        "minor": "smooth_continue"}.get(t, "smooth_continue"))
+    intents = intents[:len(tiers)]
+
     return {
         "arc": arc,
         "text_prompt": text_prompt,
+        "set_narrative": set_narrative.strip()[:240],
+        "narrative_notes": narrative_notes.strip()[:240],
         "surprise_budget": surprise_budget,
         "callback_budget": callback_budget,
         "transition_tiers": tiers,
+        "transition_intents": intents,
         "accent_hints": accents,
         "same_genre_tight_mix": sg,
         "_fallback": bool(raw.get("_fallback")),
@@ -332,6 +389,21 @@ def run_director(
             "Qwen/Qwen2.5-7B-Instruct",
         )
         is_audio_model = "audio" in model_id.lower() and audio_clip_paths
+        # Pool intelligence: inject a clip-by-clip inventory so Director
+        # can reason about WHAT the user uploaded, not just COUNT.
+        pool_block = ""
+        if clips_meta:
+            try:
+                from pool_intelligence import summary_table, diagnose
+                pool_block = summary_table(clips_meta) + "\n"
+                diag = diagnose(clips_meta)
+                pool_block += (f"Pool diagnostic: verdict={diag['verdict']}, "
+                               f"coherence={diag['coherence']}, "
+                               f"genres={diag['n_genres']}, "
+                               f"bpm_spread={diag['bpm_spread_pct']}%\n")
+                pool_block += f"Narrative advice: {diag['narrative_advice']}\n\n"
+            except Exception as e:
+                pool_block = f"(pool inventory unavailable: {e})\n"
         # Style-RAG: prepend retrieved real DJ examples as taste anchors.
         rag_block = ""
         try:
@@ -342,8 +414,8 @@ def run_director(
         llm_prompt = (
             f"User DJ request:\n{user_prompt}\n\n"
             f"Suggested arc preset: {arc_fb}\n"
-            f"Clip pool size: {clip_count_estimate}, "
-            f"produce transition_tiers of length exactly {mt}.\n"
+            f"Number of transitions to plan: {mt}\n\n"
+            + pool_block
             + (rag_block if rag_block else "")
         )
         try:

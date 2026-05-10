@@ -62,23 +62,48 @@ def cmd_plan(args: argparse.Namespace) -> None:
             clip_count_estimate=len(clips),
             approx_duration_seconds=float(args.duration),
             audio_clip_paths=audio_paths or None,
+            clips_meta=clips,
         )
         print(f"[director] arc={director_out.get('arc')} "
               f"prompt='{(director_out.get('text_prompt') or '')[:60]}' "
               f"tiers={len(director_out.get('transition_tiers') or [])}")
-        # Persist Director JSON next to output mix so S5 self-play /
-        # S7 DPO can reconstruct preference pairs as text.
+        # Persist Director JSON + pool diagnostic + narrative card next
+        # to output mix.
         try:
             out_path = getattr(args, 'out', None) or getattr(args, 'output', None)
             if out_path:
                 from pathlib import Path as _P
                 import json as _json
-                dpath = _P(out_path).parent / 'director.json'
-                dpath.parent.mkdir(parents=True, exist_ok=True)
-                with open(dpath, 'w') as _f:
+                out_parent = _P(out_path).parent
+                out_parent.mkdir(parents=True, exist_ok=True)
+                with open(out_parent / 'director.json', 'w') as _f:
                     _json.dump(director_out, _f, indent=2)
+                try:
+                    from pool_intelligence import diagnose
+                    diag = diagnose(clips)
+                    card = {
+                        'set_narrative':   director_out.get('set_narrative', ''),
+                        'narrative_notes': director_out.get('narrative_notes', ''),
+                        'arc':             director_out.get('arc'),
+                        'pool_diagnostic': diag,
+                        'transition_plan': list(zip(
+                            director_out.get('transition_tiers', []),
+                            director_out.get('transition_intents', []),
+                        )),
+                    }
+                    with open(out_parent / 'card.json', 'w') as _f:
+                        _json.dump(card, _f, indent=2)
+                    print(f"[director] narrative: {card['set_narrative']}")
+                    if card['narrative_notes']:
+                        print(f"[director] notes: {card['narrative_notes']}")
+                    print(f"[diagnostic] verdict={diag['verdict']} "
+                          f"coherence={diag['coherence']} "
+                          f"genres={diag['n_genres']} "
+                          f"bpm_spread={diag['bpm_spread_pct']}%")
+                except Exception:
+                    pass
         except Exception as _e:
-            print(f"warn: could not save director.json ({_e})")
+            print(f"warn: could not save director.json/card ({_e})")
 
     arc_final = (director_out or {}).get('arc') or getattr(args, 'arc', 'build')
     prompt_final = (director_out or {}).get('text_prompt') or getattr(args, 'prompt', None)
@@ -111,7 +136,7 @@ def cmd_plan(args: argparse.Namespace) -> None:
         tiers = director_out.get('transition_tiers') or []
         accents = director_out.get('accent_hints') or []
         if tiers:
-            apply_llm_transition_tiers_to_timeline(tl, tiers)
+            apply_llm_transition_tiers_to_timeline(tl, tiers, director_out.get("transition_intents"))
             print(f"[director] applied {len(tiers)} LLM tier transitions")
         if accents:
             attach_accent_hints(tl, accents)
@@ -180,23 +205,48 @@ def cmd_all(args: argparse.Namespace) -> None:
             clip_count_estimate=len(clips),
             approx_duration_seconds=float(args.duration),
             audio_clip_paths=audio_paths or None,
+            clips_meta=clips,
         )
         print(f"[director] arc={director_out.get('arc')} "
               f"prompt='{(director_out.get('text_prompt') or '')[:60]}' "
               f"tiers={len(director_out.get('transition_tiers') or [])}")
-        # Persist Director JSON next to output mix so S5 self-play /
-        # S7 DPO can reconstruct preference pairs as text.
+        # Persist Director JSON + pool diagnostic + narrative card next
+        # to output mix.
         try:
             out_path = getattr(args, 'out', None) or getattr(args, 'output', None)
             if out_path:
                 from pathlib import Path as _P
                 import json as _json
-                dpath = _P(out_path).parent / 'director.json'
-                dpath.parent.mkdir(parents=True, exist_ok=True)
-                with open(dpath, 'w') as _f:
+                out_parent = _P(out_path).parent
+                out_parent.mkdir(parents=True, exist_ok=True)
+                with open(out_parent / 'director.json', 'w') as _f:
                     _json.dump(director_out, _f, indent=2)
+                try:
+                    from pool_intelligence import diagnose
+                    diag = diagnose(clips)
+                    card = {
+                        'set_narrative':   director_out.get('set_narrative', ''),
+                        'narrative_notes': director_out.get('narrative_notes', ''),
+                        'arc':             director_out.get('arc'),
+                        'pool_diagnostic': diag,
+                        'transition_plan': list(zip(
+                            director_out.get('transition_tiers', []),
+                            director_out.get('transition_intents', []),
+                        )),
+                    }
+                    with open(out_parent / 'card.json', 'w') as _f:
+                        _json.dump(card, _f, indent=2)
+                    print(f"[director] narrative: {card['set_narrative']}")
+                    if card['narrative_notes']:
+                        print(f"[director] notes: {card['narrative_notes']}")
+                    print(f"[diagnostic] verdict={diag['verdict']} "
+                          f"coherence={diag['coherence']} "
+                          f"genres={diag['n_genres']} "
+                          f"bpm_spread={diag['bpm_spread_pct']}%")
+                except Exception:
+                    pass
         except Exception as _e:
-            print(f"warn: could not save director.json ({_e})")
+            print(f"warn: could not save director.json/card ({_e})")
 
     arc_final = (director_out or {}).get('arc') or getattr(args, 'arc', 'build')
     prompt_final = (director_out or {}).get('text_prompt') or getattr(args, 'prompt', None)
@@ -231,7 +281,7 @@ def cmd_all(args: argparse.Namespace) -> None:
         tiers = director_out.get('transition_tiers') or []
         accents = director_out.get('accent_hints') or []
         if tiers:
-            apply_llm_transition_tiers_to_timeline(tl, tiers)
+            apply_llm_transition_tiers_to_timeline(tl, tiers, director_out.get("transition_intents"))
             print(f"[director] applied {len(tiers)} LLM tier transitions")
         if accents:
             attach_accent_hints(tl, accents)

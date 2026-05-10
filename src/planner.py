@@ -649,8 +649,14 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
 def apply_llm_transition_tiers_to_timeline(
     timeline: list[dict],
     transition_tiers: list[str],
+    transition_intents: list[str] | None = None,
 ) -> None:
-    """Overwrite transition_in from LLM tiers (junction j = timeline[j+1]). In-place."""
+    """Overwrite transition_in from LLM tiers (junction j = timeline[j+1]). In-place.
+
+    Optional transition_intents propagated into transition_in['intent'] so
+    constitutional validator + metadata cards can show WHY each transition
+    was picked.
+    """
     from transition_mapping import tier_to_technique
 
     if not timeline:
@@ -658,11 +664,14 @@ def apply_llm_transition_tiers_to_timeline(
     tiers = list(transition_tiers) if transition_tiers else []
     if not tiers:
         return
+    intents = list(transition_intents) if transition_intents else []
     for i in range(1, len(timeline)):
         j = i - 1
         tier = tiers[j % len(tiers)]
         tech = tier_to_technique(tier, j)
         tech = _apply_restricted_filter(tech)
+        if j < len(intents):
+            tech["intent"] = intents[j]
         timeline[i]["transition_in"] = tech
 
 
