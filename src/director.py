@@ -179,7 +179,8 @@ CONSTRAINTS:
     peak:     50% minor, 35% major, 1-2 drops (only if pool supports)
     flat_low: all minor. No major. No drop.
 - accents: cap 2 per junction. Use on major/drop tier only.
-  Categories: risers, impacts, snare_rolls, sweeps, hihat_rolls, sub_drops
+  Categories: risers, impacts, snare_rolls, sweeps, hihat_rolls, sub_drops,
+              airhorns (festival meme), vinyl (vinyl-stop / spinback meme)
 - Prefer NO accent over a forced one.
 - If pool is too disparate (low coherence, no clusters), say so in `narrative_notes` and use MOSTLY minor tiers (>=60%) — but ALWAYS allow at least 1-2 `major` picks per 10 junctions to mark intentional genre jumps. ALL-MINOR is FORBIDDEN — it produces a flat, boring mix the user notices immediately. Even a "journey" set needs occasional sectional markers.
 - HARD RULE on incompatible bridges: NEVER use `drop` or `major` tier for a junction whose two clips differ in genre cluster AND have BPM gap > 8 BPM. That combination produces audible energy mismatch + phase cancellation (verified: probe severity ≥ 0.85 on every such forced junction). When forced into such a bridge, use `minor` with intent `breath` or `cooldown` — let the listener absorb the cluster shift, don't paper it over with a drop.
@@ -196,7 +197,7 @@ OUTPUT SCHEMA (EXACT keys, no extras):
   "callback_budget": <int 0-3>,
   "transition_tiers": ["minor","major","drop",...],
   "transition_intents": ["breath","build_tension","drop_payoff","genre_jump","callback","smooth_continue","cooldown",...],
-  "accent_hints": [ {"junction_index": 0, "fx_category": "risers|impacts|snare_rolls|sweeps|hihat_rolls|sub_drops", "beats": 4.0} ],
+  "accent_hints": [ {"junction_index": 0, "fx_category": "risers|impacts|snare_rolls|sweeps|hihat_rolls|sub_drops|airhorns|vinyl", "beats": 4.0} ],
   "same_genre_tight_mix": false
 }
 
