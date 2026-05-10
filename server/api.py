@@ -321,7 +321,7 @@ def _candidate_pool_for_user_clip(user_emb, user_bpm_mean: float | None,
         import numpy as np
     except ImportError:
         return []
-    if not LIBRARY_CACHE_DIR.exists():
+    if not LIBRARY_CACHE_DIR.exists() or not LIBRARY_CLIPS_DIR.exists():
         return []
     enorm = float(np.linalg.norm(user_emb)) + 1e-9
     cands = []
