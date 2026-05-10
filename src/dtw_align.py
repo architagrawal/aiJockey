@@ -96,19 +96,27 @@ def align_overlap(prev_tail: np.ndarray,
     prev_tail = np.asarray(prev_tail)
     cur_head = np.asarray(cur_head)
 
-    max_lag = int(sr * max_shift_ms / 1000.0)
+    max_lag_samples = int(sr * max_shift_ms / 1000.0)
 
-    # Envelopes — mono, smoothed RMS magnitude
+    # Envelopes — mono, smoothed RMS magnitude, DECIMATED by win.
+    # decim = sr * envelope_ms/1000 (envelope hop in samples).
     a = _envelope_mono(prev_tail, sr, envelope_ms)
     b = _envelope_mono(cur_head, sr, envelope_ms)
+    decim = max(1, int(sr * envelope_ms / 1000.0))
 
     n = int(min(len(a), len(b)))
-    if n < sr // 4:    # < 250 ms — too short for reliable xcorr
+    # Need at least 250 ms of envelope = 250/envelope_ms frames at decim rate.
+    min_envelope_frames = max(2, int(250 / max(1.0, envelope_ms)))
+    if n < min_envelope_frames:
         return cur_head, 0, 0.0
     a = a[:n]
     b = b[:n]
 
-    lag, confidence = _xcorr_peak_lag(a, b, max_lag)
+    # Convert max_lag to envelope-frame units for the xcorr search.
+    max_lag_frames = max(1, max_lag_samples // decim)
+    lag_frames, confidence = _xcorr_peak_lag(a, b, max_lag_frames)
+    # Map envelope-frame lag back to sample-rate lag for _apply_shift.
+    lag = int(lag_frames * decim)
 
     # Reject low-confidence shifts (random correlation rather than real beat).
     if confidence < min_confidence:
@@ -116,7 +124,7 @@ def align_overlap(prev_tail: np.ndarray,
 
     # Reject clamp-boundary peaks — usually means xcorr trailed off the
     # window, not a real alignment.
-    if abs(lag) >= max_lag:
+    if abs(lag) >= max_lag_samples:
         return cur_head, 0, confidence
 
     if lag == 0:
@@ -132,13 +140,23 @@ def align_overlap(prev_tail: np.ndarray,
 
 
 def _envelope_mono(wav: np.ndarray, sr: int, win_ms: float) -> np.ndarray:
-    """Smoothed RMS-style envelope. (C, T) or (T,) → (T,)."""
+    """Smoothed RMS-style envelope. (C, T) or (T,) → (T,) at REDUCED rate.
+
+    BUG FIX: previously returned full-rate envelope, leaving caller with
+    O(N²) np.correlate cost on raw audio length. For 8-clip aug pool with
+    overlap_n ~700k samples per junction, this took multiple minutes per
+    DTW call → effective hang on multi-junction renders.
+
+    Now decimates to 1 sample per `win` (typically 20 ms = 50 fps). For
+    2-sec overlap that's 100 envelope samples → xcorr is 100² = instant.
+    Caller's lag interpretation must be re-scaled by `decim` factor;
+    align_overlap below now multiplies returned lag by decim ratio to
+    map back into original sample space.
+    """
     if wav.ndim == 2:
-        # Mix down to mono (same as librosa.to_mono)
         if wav.shape[0] in (1, 2):
             mono = wav.mean(axis=0)
         else:
-            # Treat as (T, C) if shape doesn't look like channels-first
             mono = wav.mean(axis=-1) if wav.shape[-1] <= 8 else wav.mean(axis=0)
     elif wav.ndim == 1:
         mono = wav
@@ -151,13 +169,11 @@ def _envelope_mono(wav: np.ndarray, sr: int, win_ms: float) -> np.ndarray:
     win = max(1, int(sr * win_ms / 1000.0))
     if win <= 1 or win >= len(abs_w):
         return abs_w
-    # Box-filter smoothing — fast O(N) via cumulative sum trick.
     csum = np.cumsum(np.insert(abs_w, 0, 0.0))
     smoothed = (csum[win:] - csum[:-win]) / win
-    # Pad to original length so caller sees consistent indexing
-    pad = len(abs_w) - len(smoothed)
-    if pad > 0:
-        smoothed = np.pad(smoothed, (0, pad), mode="edge")
+    # Decimate by `win` (one envelope sample per smoothing window).
+    # Returns ~50 fps envelope at win_ms=20.
+    smoothed = smoothed[::win]
     return smoothed.astype(np.float32, copy=False)
 
 
