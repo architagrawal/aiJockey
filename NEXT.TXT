@@ -1,0 +1,158 @@
+Tier 1 — high-impact, low-friction (do after demo ships)
+
+  A. Mel-Band Roformer for vocal stems  Beats BS-Roformer on vocals/drums/other. SDR 11.93 on Multisong (vs htdemucs_ft ~9). Branch already has BS-Roformer scaffold —
+  swap to Mel-Band variant + UVR checkpoint. Same code path. Direct ~+2 dB win.
+  - Repo: ZFTurbo/Music-Source-Separation-Training (https://github.com/ZFTurbo/Music-Source-Separation-Training) — pretrained
+  checkpoints
+  - Paper: Mel-Band RoFormer (arXiv 2310.01809) (https://arxiv.org/abs/2310.01809)
+
+  B. All-In-One Music Structure Analyzer (Bytedance / mir-aidj)
+  Replaces Beat-This! + librosa MFCC segmentation in ONE model. Joint output: beats + downbeats + tempo + functional segments (intro   / outro / break / bridge / inst / solo / verse / chorus) + per-stem embeddings.
+  - Director's Phase 1 "drop only on drop-section" rule becomes empirically grounded instead of vibes — chorus and solo labels
+  available directly.
+  - Already uses demucs stems as input — we have those.
+  - SOTA on Harmonix Set. MIT licensed.
+  - Repo: mir-aidj/all-in-one (https://github.com/mir-aidj/all-in-one)
+
+  C. Meta Audiobox Aesthetics as critic
+  Reference-free music quality scorer. 4 axes: Production Quality, Production Complexity, Content Enjoyment, Content Usefulness.
+  Beats CLAP score for quality (CLAP measures semantic alignment, not perceptual quality — explicit warning in paper).
+  - Replaces unreliable CriticV2 (val acc 0.77 + codec bias) at zero training cost.
+  - Pretrained, open weights.
+  - Wire into /generate next to probes — second-opinion signal.
+  - Paper: Meta Audiobox Aesthetics (arXiv 2502.05139) (https://arxiv.org/html/2502.05139v1)
+
+  Tier 2 — bigger swaps (post-demo)
+
+  D. DJtransGAN as learned transition engine
+  ICASSP 2022. Differentiable EQ + fader + GAN trained on real DJ mixes. 70.5% preferred over rule-based crossfade in user study.
+  Backprop-able mix — could integrate into improver loop.
+  - Repo: ChenPaulYu/DJtransGAN (https://github.com/ChenPaulYu/DJtransGAN)
+  - Replace ~30% of transitions.py rules with learned variant.
+
+  E. ACE-Step (Apache 2.0) for generative bridges
+  Solves the audiocraft+ROCm blocker that killed our S8 plan. ACE-Step has explicit ROCm fork. Suno-quality, runs locally on AMD.
+  - Repo: isdood/ACE-Step-ROCm (https://github.com/isdood/ACE-Step-ROCm)
+  - Generate 8-bar bridges between BPM/genre-incompatible clips.
+  - Stable Audio Open 1.5 also viable (CC-trained data, no copyright issues).
+  - Alt: InstructME (latent diffusion + chord-progression matrix
+    constraint, multi-round edits). Stronger harmonic preservation
+    than ACE-Step; ROCm support not validated. Re-evaluate if ACE-Step
+    drift turns out high in transition-bridge use.
+    Paper: arXiv 2308.14360
+
+  Tier 3 — research-grade, experimental
+
+  F. MuQ-Eval as DPO reward signal
+  Music-specific quality metric. Could replace probe-severity as preference signal for S7 DPO — higher fidelity than aggregate
+  severity.
+  - Paper: MuQ-Eval (https://arxiv.org/html/2603.22677v1)
+
+  G. AudioMOS DORA-MOS (Challenge 2025 winner)
+  Pretrained MOS predictor — Mean Opinion Score for synthetic audio. Adds another head to the critic stack.
+  - AudioMOS Challenge 2025 (https://arxiv.org/html/2509.01336v1)
+
+  Tier 1 follow-up — depends on B (All-In-One) landing
+
+  H. Candidate-scored transition picker
+  Once All-In-One emits labeled segments (verse / chorus / break / pre-drop),
+  swap Director's ad-hoc junction selection for a 3-candidate-per-clip
+  scored picker: {verse_end, chorus_end, breakdown_start, pre_drop} ranked
+  by multi-factor score (energy-curve match, vocal-presence, key compat,
+  BPM strain, transition-type fit). Empirically grounded handoff points
+  rather than vibes. Inspired by kckDeepak/AI-DJ-Mixing-System.
+  - Trigger: after H lands All-In-One in src/all_in_one_wrapper.py
+  - Wire-in: ~50 lines in src/planner.py (replace junction-pick branch)
+  - Cost: free at inference (segments already computed for the labels)
+
+  I. EDMFormer — genre-specific structure for EDM pool (lands: tier1-upgrades)
+  Transformer for EDM-only structural segmentation: drop, buildup,
+  breakdown labels that All-In-One (trained on Western pop) misses.
+  AiJockey clip pool is EDM-heavy — All-In-One verse/chorus labels
+  systematically wrong for techno/dubstep/dnb/hardstyle where structure
+  is spectral-density driven, not chord-driven.
+  - Wire: invoke conditionally when Director classifies pool as EDM
+    (existing genre tag from prefix); fall back to All-In-One for
+    pop/non-EDM.
+  - Pairs with H (candidate-scored picker) — picker scores against
+    drop/buildup labels instead of pop verse/chorus.
+  - Paper: EDMFormer (arXiv 2603.08759)
+  - **BLOCKED**: as of 2026-05, no public checkpoint or training code
+    found. Track upstream for release; if authors don't publish weights,
+    self-train on EDM-98 dataset (98 annotated tracks) becomes the path
+    — small dataset, finetune from MERT/MusicFM may suffice. Re-evaluate
+    Q3 2026.
+
+  J. COCOLA scorer — stem-compat gate for mashup/stem_swap (lands: tier1-upgrades, low priority)
+  Contrastive model estimating harmonic + rhythmic coherence between
+  two stems. Pre-flight gate for Director's mashup_transition +
+  stem_swap_transition picks — reject incompatible pairs before render
+  instead of catching dissonance post-render in critic_v2 / probes.
+  - Source: github.com/gladia-research-group/cocola (Apache, public
+    checkpoints trained on MUSDB18-HQ/MoisesDB/Slakh2100/CocoChorales)
+  - Paper: arXiv 2404.16969 (COCOLA: Coherence-Oriented Contrastive
+    Learning of Musical Audio Representations)
+  - Wire: src/cocola_score.py wrapper; in planner.py mashup-pick branch
+    score candidate stem pairs, reject below threshold, cascade to
+    crossfade.
+  - **Low priority**: mashup_transition + stem_swap aren't frequent
+    Director picks. Most transitions go crossfade/eq_swap/filter_fade
+    where COCOLA never fires. Land if/when stem-overlay transitions
+    become a more common pick (e.g. after H candidate-scored picker
+    surfaces more mashup opportunities from labeled vocal segments).
+
+  Considered + dropped from this pass:
+  - FAD critic vs dj_sets_mp3 corpus — 25-set reference corpus too small
+    for stable Gaussian fit (standard FAD uses 1000s); Audiobox
+    Aesthetics (Tier1-C) covers similar perceptual-quality role
+    reference-free. Revisit only if reference corpus 10x'd.
+  - MusRec timbre morphing — duplicative with E (ACE-Step) generative
+    role; rock→deep-house style use case not in current pool;
+    diffusion latency cost not justified at Tier-3 priority. Park.
+
+  Cross-cutting techniques NOT yet evaluated (worth follow-up)
+
+  - DTW alignment at beat boundaries — eliminates phase cancellation probes are flagging (sub-sample beat snap)
+  - Spectral hold / freeze on genre jumps — cheap rule-based "glue layer"
+  - Tonal Pitch Space (TPS) — replaces Camelot wheel for non-Western scales
+  - EnCodec / DAC latent-space mixing — interpolate in neural-codec latent space instead of raw audio
+
+  My recommendation: 3 high-leverage moves post-demo
+
+  1. All-In-One Structure Analyzer — single biggest architectural win. Director gets ground-truth section labels. ~50 lines wire-in
+  + replace madmom/librosa fallback. Likely closes ~30% of severity gap by alone.
+  2. Mel-Band Roformer vocals — branch scaffold ready. Drop checkpoint, flip flag. Audible win on stem-swap + mashup transitions.
+  3. Meta Audiobox Aesthetics as second-opinion critic — wire alongside probes in /generate header. Free quality signal. Replaces
+  CriticV2's training timeline.
+
+  Skip DJtransGAN + ACE-Step until demo ships. Both are real but week-of-work, not hour-of-work.
+
+  What this changes about backlog
+
+  Three of my "post-demo backlog" items get better alternatives:
+  - ~~CriticV2 retrain~~ → Meta Audiobox Aesthetics (no training)
+  - ~~MusicGen S8 (audiocraft blocked)~~ → ACE-Step ROCm fork
+  - ~~Beat-This! + sections separately~~ → All-In-One does both
+
+  Net: backlog shrinks, and quality ceiling rises.
+
+  Sources
+
+  - BS-RoFormer (lucidrains) (https://github.com/lucidrains/BS-RoFormer)
+  - Music-Source-Separation-Training (ZFTurbo) (https://github.com/ZFTurbo/Music-Source-Separation-Training)
+  - Mel-Band RoFormer paper (https://arxiv.org/abs/2310.01809)
+  - Mel-RoFormer for Vocal Separation
+  (https://www.researchgate.net/publication/383911604_Mel-RoFormer_for_Vocal_Separation_and_Vocal_Melody_Transcription)
+  - All-In-One Music Structure Analyzer (mir-aidj) (https://github.com/mir-aidj/all-in-one)
+  - All-In-One paper (arXiv 2307.16425) (https://arxiv.org/abs/2307.16425)
+  - Stable Audio Open 1.0 (HuggingFace) (https://huggingface.co/stabilityai/stable-audio-open-1.0)
+  - ACE-Step ROCm fork (https://github.com/isdood/ACE-Step-ROCm)
+  - ACE-Step 2026 guide (Spheron) (https://www.spheron.network/blog/deploy-open-source-ai-music-generation-gpu-cloud-2026/)
+  - DJtransGAN (ChenPaulYu) (https://github.com/ChenPaulYu/DJtransGAN)
+  - DJtransGAN paper (arXiv 2110.06525) (https://arxiv.org/abs/2110.06525)
+  - DJ AI: Optimizing Playlist Alignment (ACM 2025) (https://dl.acm.org/doi/10.1145/3771594.3771640)
+  - Meta Audiobox Aesthetics paper (https://arxiv.org/html/2502.05139v1)
+  - Meta Audiobox Aesthetics framework (https://www.emergentmind.com/topics/meta-audiobox-aesthetics)
+  - MuQ-Eval (https://arxiv.org/html/2603.22677v1)
+  - AudioMOS Challenge 2025 (https://arxiv.org/html/2509.01336v1)
+  - Survey on Evaluation Metrics for Music Generation (https://arxiv.org/html/2509.00051v1)

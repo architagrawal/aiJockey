@@ -35,6 +35,30 @@ madmom @ git+https://github.com/CPJKU/madmom.git@main
 # still come from htdemucs_ft (BS-Roformer is vocals-only in published ckpts).
 bs-roformer>=0.4.0; extra == "premium"
 
+# --------------------------------------------------------------------------
+# Tier-1 model upgrades (opt-in via env knobs; see docs/tier1_upgrades.md)
+# --------------------------------------------------------------------------
+#
+# A. All-In-One Music Structure Analyzer (mir-aidj/all-in-one)
+#    Joint beats + downbeats + section labels (chorus/verse/bridge/...) in
+#    one transformer pass. Replaces Beat-This! + librosa MFCC segmentation.
+#    Activate: AIJOCKEY_ALL_IN_ONE=1
+# allin1>=1.1.0 ; extra == "tier1"
+#
+# B. Mel-Band Roformer for vocals (lucidrains/BS-RoFormer provides class)
+#    Already pulled via bs-roformer above; checkpoint must be downloaded
+#    separately. UVR's MelBandRoformer.ckpt works.
+#    Activate: AIJOCKEY_MEL_BAND_ROFORMER=1 + AIJOCKEY_MEL_BAND_ROFORMER_CKPT=path
+#    (uses the same bs-roformer dep already declared above)
+#
+# C. Meta Audiobox Aesthetics — reference-free 4-axis quality scorer.
+#    Replaces unreliable CriticV2 with zero training cost. Pretrained.
+#    Activate: AIJOCKEY_AUDIOBOX_AESTHETICS=1
+# audiobox-aesthetics ; extra == "tier1"
+#
+# To install all tier-1 deps:
+#   pip install -r requirements-rocm.txt allin1 audiobox-aesthetics
+
 # Notes for ROCm operators:
 # - bitsandbytes: NOT installed by default. Vanilla wheel is CUDA-only. To use
 #   AIJOCKEY_QLORA=1 or AIJOCKEY_INT8=1, install bitsandbytes-rocm or upstream

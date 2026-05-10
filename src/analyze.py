@@ -210,8 +210,38 @@ class Analyzer:
             print(f"[analyze] batched stems failed ({e}); per-clip fallback")
             return [self.stems(w) for w in wavs]
 
-    def beats_and_downbeats(self, wav: torch.Tensor) -> tuple[float, list[float], list[float]]:
+    def beats_and_downbeats(self, wav: torch.Tensor,
+                             audio_path: str | None = None
+                             ) -> tuple[float, list[float], list[float]]:
         mono = wav.mean(0).numpy().astype(np.float32)
+        # All-In-One Music Structure Analyzer (Tier-1 B): joint beats +
+        # downbeats + section labels in one transformer pass. Default OFF
+        # (AIJOCKEY_ALL_IN_ONE=1 to enable). Sections also stashed on
+        # self._aio_sections for sections() to pick up — saves a redundant
+        # forward pass per clip.
+        # Falls through to Beat-This! / madmom / librosa on any failure.
+        if audio_path is not None:
+            try:
+                from all_in_one_wrapper import enabled as _aio_enabled, analyze_audio_path as _aio
+                if _aio_enabled():
+                    _aio_result = _aio(audio_path, device=self.device)
+                    if _aio_result is not None:
+                        # Stash sections for sections() to consume.
+                        self._aio_sections = _aio_result.get('sections') or []
+                        tempo = float(_aio_result.get('tempo', 0.0))
+                        beats = list(_aio_result.get('beats') or [])
+                        downbeats = list(_aio_result.get('downbeats') or [])
+                        # Octave-normalize tempo before returning (same as below)
+                        try:
+                            from tempo_octave import normalize_tempo
+                            ghint = getattr(self, '_current_genre_hint', None)
+                            tempo = normalize_tempo(tempo, genre=ghint)
+                        except Exception:
+                            pass
+                        return tempo, beats, downbeats
+            except Exception as e:
+                print(f"[analyze] all_in_one fallback ({e.__class__.__name__}: {e})")
+
         # Beat-This! (P0): joint beats + downbeats from a single GPU transformer
         # pass. Replaces the librosa fallback `downbeats = beats[::4]` heuristic
         # which corrupts 3/4 of downbeats on swung / non-4/4 / pickup-bar material
@@ -270,7 +300,57 @@ class Analyzer:
         Segment via full-mix MFCC (timbral changes), label energy via drums+bass
         stem RMS (drops characterized by heavy low-end). Falls back to full-mix
         RMS if stems unavailable.
+
+        Tier-1 B path: when AIJOCKEY_ALL_IN_ONE=1 and beats_and_downbeats()
+        previously stashed All-In-One sections on self._aio_sections, return
+        those directly with `label` field carrying functional types
+        (verse/chorus/break/bridge/...). Downstream candidate_picker reads
+        the labels for empirical junction scoring. Falls through to MFCC
+        clustering on miss.
         """
+        # All-In-One stashed sections (with functional labels)?
+        aio_sections = getattr(self, '_aio_sections', None)
+        if aio_sections:
+            # Annotate with stem-derived energy + vocal_activity for parity
+            # with the existing schema downstream code expects.
+            try:
+                vox_rms_ref = inst_rms_ref = rms = rms_times = None
+                mono = wav.mean(0).numpy().astype(np.float32)
+                rms = librosa.feature.rms(y=mono)[0]
+                rms_times = librosa.frames_to_time(np.arange(len(rms)), sr=SR)
+                if stems and 'vocals' in stems and 'drums' in stems:
+                    vox_mono = stems['vocals'].mean(0).numpy().astype(np.float32)
+                    vox_rms_ref = librosa.feature.rms(y=vox_mono)[0]
+                    inst_sig = sum(stems[k].mean(0).numpy().astype(np.float32)
+                                    for k in ('drums', 'bass', 'other') if k in stems)
+                    if hasattr(inst_sig, 'shape'):
+                        inst_rms_ref = librosa.feature.rms(y=inst_sig)[0]
+                out: list[dict] = []
+                for s in aio_sections:
+                    start = float(s.get('start', 0.0))
+                    end = float(s.get('end', 0.0))
+                    mask = (rms_times >= start) & (rms_times < end) if rms_times is not None else None
+                    energy_meas = float(rms[mask].mean()) if (mask is not None and mask.any()) else float(s.get('energy', 0.5))
+                    sd = {
+                        'start': start,
+                        'end': end,
+                        'energy': energy_meas,
+                        'label': str(s.get('label', s.get('type', '?'))),
+                        'type': str(s.get('label', s.get('type', '?'))),
+                        'source': 'all_in_one',
+                    }
+                    if vox_rms_ref is not None and inst_rms_ref is not None and mask is not None and mask.any():
+                        v = float(vox_rms_ref[mask].mean())
+                        i_ = float(inst_rms_ref[mask].mean())
+                        sd['vocal_activity'] = round(v / (v + i_ + 1e-8), 4)
+                    out.append(sd)
+                if out:
+                    # Clear cache so subsequent clips re-derive fresh.
+                    self._aio_sections = None
+                    return out
+            except Exception as e:
+                print(f"[analyze] all_in_one sections annotate fallback ({e})")
+                self._aio_sections = None
         mono = wav.mean(0).numpy().astype(np.float32)
         mfcc = librosa.feature.mfcc(y=mono, sr=SR, n_mfcc=13)
         bounds = librosa.segment.agglomerative(mfcc, k=n_segments)
@@ -364,8 +444,11 @@ class Analyzer:
         stems_dir.mkdir(parents=True, exist_ok=True)
         for name, s in stems.items():
             torchaudio.save(str(stems_dir / f'{name}.wav'), s, SR)
-        # Beats/downbeats/tempo
-        tempo, beats, downbeats = self.beats_and_downbeats(wav)
+        # Beats/downbeats/tempo. Pass audio_path so All-In-One (when enabled)
+        # can run from the file directly — it's a path-based API and a
+        # single forward pass also produces section labels stashed on
+        # self._aio_sections for sections() below.
+        tempo, beats, downbeats = self.beats_and_downbeats(wav, audio_path=path)
         # Key
         key, key_conf = self.key_camelot(wav)
         # Sections (stem-aware: uses drums+bass RMS for energy labeling)
