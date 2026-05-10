@@ -557,8 +557,11 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
                 use_library.change(update_duration_info, [files, use_library],
                                    duration_info)
 
-                generate = gr.Button("Generate Mix", variant="primary",
-                                     size="lg")
+                with gr.Row():
+                    load_demo = gr.Button("load demo preset",
+                                           variant="secondary", size="sm")
+                    generate = gr.Button("Generate Mix",
+                                         variant="primary", size="lg")
 
             # Right column: output
             with gr.Column(scale=3, min_width=400):
@@ -590,6 +593,26 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
                        [out_audio, summary, timeline_plot, segments_df,
                         audiobox_plot],
                        concurrency_id="gpu_job", concurrency_limit=4)
+
+        def _load_demo_preset():
+            """One-click demo: pick first 4 sample clips + dj_set +
+            tomorrowland + festival_inferno + 180s + library balanced."""
+            ids = [cid for _, cid in fetch_sample_clips()][:4]
+            return (
+                gr.update(value=ids),                       # sample_picks
+                gr.update(value="Festival Inferno"),        # preset
+                gr.update(value=180),                        # duration
+                gr.update(value=True),                       # use_library
+                gr.update(value="balanced"),                # mix_mode
+                gr.update(value="dj_set"),                  # mode_choice
+                gr.update(value="on"),                      # vocals_choice
+                gr.update(value=True),                       # advanced_on
+                gr.update(value="tomorrowland"),            # custom_arc
+            )
+        load_demo.click(
+            _load_demo_preset, None,
+            [sample_picks, preset, duration, use_library, mix_mode,
+             mode_choice, vocals_choice, advanced_on, custom_arc])
 
         # Sign-in surfacing: show "signed in as X" when user has logged in.
         # gradio auto-injects gr.OAuthProfile when fn signature requests it.
