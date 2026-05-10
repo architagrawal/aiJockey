@@ -392,6 +392,21 @@ def library_clip_paths_clap(centroid, count: int,
                   f"bpm={parts['bpm']:.2f} outlier={parts['outlier']:+.2f}")
     except Exception:
         pass
+    # Quality gate: if EVERY top candidate scores < threshold, the library
+    # has nothing close to the user pool — better to return empty than
+    # force incompatible clips into the mix (the v6_libaug failure mode:
+    # 0.94 probe severity from 6 forced disparate-genre picks).
+    # Caller logs a warning + falls back to user-only mix (mix_mode=tight).
+    POOL_MISMATCH_THRESHOLD = 0.0  # composite score below this = no clip is "good"
+    if candidates and all(c[0] < POOL_MISMATCH_THRESHOLD for c in candidates[:count]):
+        try:
+            top = candidates[0][0]
+            print(f"[lib_pick] WARN: pool-library mismatch — top score {top:.3f} "
+                  f"< threshold {POOL_MISMATCH_THRESHOLD}; returning EMPTY "
+                  f"(library has no clip stylistically close to user pool)")
+        except Exception:
+            pass
+        return []
     return [p for _, p, _ in candidates[:count]]
 
 
@@ -650,8 +665,18 @@ def _run_generate_sync(
                 centroid, n_lib, user_bpm_mean=user_bpm_mean,
                 user_keys=user_keys, user_clap_embs=user_embs)
             if not library_picked:
-                # Centroid-based pick failed (no embeddings yet). Alphabetical.
-                library_picked = library_clip_paths(limit=n_lib)
+                # Two reasons we get []: (1) centroid None — no embeddings
+                # yet; fall back to alphabetical. (2) composite picker
+                # rejected ALL because none matched user pool (all scores
+                # < 0). In case (2) we honor that: do NOT pollute mix with
+                # alphabetical picks. Telemetry distinguishes via _user_pool_centroid.
+                if centroid is None:
+                    library_picked = library_clip_paths(limit=n_lib)
+                else:
+                    ingest_warnings.append(
+                        f"library augmentation skipped: no library clip "
+                        f"stylistically close to user pool "
+                        f"(use mix_mode=tight to silence this warning)")
         jlog(job_id, "library_pick",
              mode=mix_mode, role=library_role,
              user_clips=len(saved_paths), user_bpm_mean=user_bpm_mean,
