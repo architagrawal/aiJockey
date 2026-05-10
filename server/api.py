@@ -259,13 +259,28 @@ def _user_pool_centroid(saved_paths: list[Path], cache_dir: Path
 
 def library_clip_paths_clap(centroid, count: int,
                               user_bpm_mean: float | None = None,
-                              bpm_tol_pct: float = 15.0
+                              bpm_tol_pct: float = 15.0,
+                              user_keys: list[str] | None = None,
+                              user_clap_embs: list = None,
                               ) -> list[Path]:
-    """Pick top-`count` library clips by CLAP cosine sim to centroid,
-    filtered by BPM band if user_bpm_mean given.
+    """Pick top-`count` library clips by COMPOSITE score combining:
 
-    Falls back to alphabetical first-N if centroid is None or no library
-    cache exists.
+      α · CLAP cosine to centroid     (vibe / genre / mood)
+      β · key-compat bonus            (Camelot wheel adjacency to ANY user key)
+      γ · BPM proximity bonus         (closer to user_bpm_mean = better)
+      δ · outlier penalty             (clip distant from EVERY user clip,
+                                       not just centroid → forces incoherent
+                                       inclusions out of pool)
+
+    Pure CLAP cosine to centroid is OK for vibe but blind to key clashes
+    and rewards "average" picks that may sit far from every individual user
+    clip. The composite catches both failure modes responsible for the
+    v6_libaug 0.94 probe severity.
+
+    Falls back to alphabetical first-N if centroid is None or library
+    cache empty. Backwards compatible: extra kwargs (user_keys,
+    user_clap_embs) are optional — caller can omit and get CLAP-only
+    behavior with BPM filter (legacy).
     """
     if count <= 0:
         return []
@@ -277,8 +292,56 @@ def library_clip_paths_clap(centroid, count: int,
         return library_clip_paths(limit=count)
     if not LIBRARY_CACHE_DIR.exists():
         return []
-    candidates: list[tuple[float, Path]] = []
+
+    # Camelot adjacency lookup: keys are compatible if same number, ±1 number,
+    # or same-letter swap. Distance 0/1 = compatible, 2+ = clash.
+    def _camelot_compat_bonus(lib_key: str, user_keys_list: list[str]) -> float:
+        if not user_keys_list or not lib_key or lib_key == '?':
+            return 0.0
+        try:
+            from camelot import camelot_distance
+        except Exception:
+            return 0.0
+        best_dist = 99
+        for uk in user_keys_list:
+            if not uk or uk == '?':
+                continue
+            try:
+                d = camelot_distance(lib_key, uk)
+                best_dist = min(best_dist, d)
+            except Exception:
+                continue
+        if best_dist == 0:
+            return 1.0   # same key = max bonus
+        if best_dist == 1:
+            return 0.6   # adjacent / relative
+        if best_dist == 2:
+            return 0.0
+        return -0.3      # 3+ steps = mild penalty
+
+    def _outlier_penalty(lib_emb, user_embs_list) -> float:
+        """Penalty if lib_emb is far from EVERY user clip individually."""
+        if not user_embs_list:
+            return 0.0
+        sims = []
+        ln = np.linalg.norm(lib_emb) + 1e-9
+        for ue in user_embs_list:
+            un = np.linalg.norm(ue) + 1e-9
+            sims.append(float((lib_emb @ ue) / (ln * un)))
+        max_sim = max(sims) if sims else 0.0
+        # if best individual sim < 0.55 → penalize (clip doesn't fit any user clip)
+        if max_sim < 0.55:
+            return -0.4 * (0.55 - max_sim) / 0.55
+        return 0.0
+
+    # Weights — tuned for "prefer cohesive over diverse".
+    A_CLAP = 1.0
+    B_KEY = 0.35
+    G_BPM = 0.25
+    D_OUTLIER = 1.0   # multiplier on already-negative penalty
+
     cnorm = float(np.linalg.norm(centroid)) + 1e-9
+    candidates: list[tuple[float, Path, dict]] = []
     for p in sorted(LIBRARY_CLIPS_DIR.iterdir()):
         if p.suffix.lower() not in ALLOWED_EXTS:
             continue
@@ -293,17 +356,43 @@ def library_clip_paths_clap(centroid, count: int,
             if a is None or a.size == 0:
                 continue
             sim = float((a @ centroid) / (np.linalg.norm(a) * cnorm + 1e-9))
-            if user_bpm_mean is not None:
-                import json as _json
-                m = _json.loads(meta.read_text())
-                bpm = float(m.get("tempo", 0.0))
-                if bpm > 0 and abs(bpm - user_bpm_mean) / user_bpm_mean > bpm_tol_pct / 100.0:
+            import json as _json
+            m = _json.loads(meta.read_text())
+            bpm = float(m.get("tempo", 0.0))
+            lib_key = str(m.get("key", "?"))
+
+            # Hard BPM filter — out-of-band clips are rejected outright.
+            if user_bpm_mean is not None and bpm > 0:
+                if abs(bpm - user_bpm_mean) / user_bpm_mean > bpm_tol_pct / 100.0:
                     continue
-            candidates.append((sim, p))
+
+            # BPM proximity score (within band)
+            bpm_score = 0.0
+            if user_bpm_mean is not None and bpm > 0:
+                bpm_score = max(0.0, 1.0 - abs(bpm - user_bpm_mean) / user_bpm_mean / 0.10)
+
+            key_bonus = _camelot_compat_bonus(lib_key, user_keys or [])
+            outlier = _outlier_penalty(a, user_clap_embs or [])
+
+            score = (A_CLAP * sim
+                     + B_KEY * key_bonus
+                     + G_BPM * bpm_score
+                     + D_OUTLIER * outlier)
+            candidates.append((score, p,
+                               {'clap': sim, 'key': key_bonus,
+                                'bpm': bpm_score, 'outlier': outlier}))
         except Exception:
             continue
     candidates.sort(key=lambda x: -x[0])
-    return [p for _, p in candidates[:count]]
+    # Telemetry: log top-N picks with score breakdown for debugging.
+    try:
+        for i, (sc, pp, parts) in enumerate(candidates[:min(count, 5)]):
+            print(f"[lib_pick] #{i} {pp.stem[:40]} score={sc:.3f} "
+                  f"clap={parts['clap']:.2f} key={parts['key']:+.2f} "
+                  f"bpm={parts['bpm']:.2f} outlier={parts['outlier']:+.2f}")
+    except Exception:
+        pass
+    return [p for _, p, _ in candidates[:count]]
 
 
 def link_or_copy(src: Path, dst: Path) -> None:
@@ -519,9 +608,16 @@ def _run_generate_sync(
     # and lib_count_for_mode > 0. Otherwise alphabetical fallback / no library.
     library_picked: list[Path] = []
     if use_library:
-        # Compute user pool stats
+        # Compute user pool stats — BPM mean, key list, per-clip CLAP embeddings.
+        # Composite library picker uses all three (was CLAP centroid only).
         user_total_sec = sum(audio_duration_seconds(p) for p in saved_paths)
         user_bpms: list[float] = []
+        user_keys: list[str] = []
+        user_embs: list = []
+        try:
+            import numpy as _np
+        except Exception:
+            _np = None
         for sp in saved_paths:
             cj = cache_dir / f"{sp.stem}.json"
             if cj.exists():
@@ -529,15 +625,30 @@ def _run_generate_sync(
                     cm = json.loads(cj.read_text())
                     if cm.get("tempo"):
                         user_bpms.append(float(cm["tempo"]))
+                    k = cm.get("key")
+                    if k and k != "?":
+                        user_keys.append(str(k))
                 except Exception:
                     pass
+            if _np is not None:
+                npz = cache_dir / f"{sp.stem}.npz"
+                if npz.exists():
+                    try:
+                        with _np.load(npz) as d:
+                            if "clap" in d:
+                                e = _np.asarray(d["clap"], dtype=_np.float32).reshape(-1)
+                                if e.size:
+                                    user_embs.append(e)
+                    except Exception:
+                        pass
         user_bpm_mean = (sum(user_bpms) / len(user_bpms)) if user_bpms else None
         n_lib = lib_count_for_mode(mix_mode, len(saved_paths),
                                     user_total_sec, float(duration))
         if n_lib > 0:
             centroid = _user_pool_centroid(saved_paths, cache_dir)
             library_picked = library_clip_paths_clap(
-                centroid, n_lib, user_bpm_mean=user_bpm_mean)
+                centroid, n_lib, user_bpm_mean=user_bpm_mean,
+                user_keys=user_keys, user_clap_embs=user_embs)
             if not library_picked:
                 # Centroid-based pick failed (no embeddings yet). Alphabetical.
                 library_picked = library_clip_paths(limit=n_lib)

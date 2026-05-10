@@ -148,6 +148,57 @@ def cmd_plan(args: argparse.Namespace) -> None:
 def cmd_execute(args: argparse.Namespace) -> None:
     from execute import execute
     execute(args.timeline, args.cache, args.out, args.samples)
+    # Optional probe + improve pass: render → probe → diagnose → mutate
+    # → re-render touched segments. Cap retries at args.improve_max_passes
+    # (default 1) to avoid infinite loops.
+    max_passes = int(getattr(args, 'improve_max_passes', 0))
+    if max_passes <= 0:
+        return
+    threshold = float(getattr(args, 'improve_threshold', 0.5))
+    import json as _json
+    from pathlib import Path as _P
+    try:
+        from audio_probes import probe_mix
+        from improver import improve_timeline, apply_edits
+    except ImportError as e:
+        print(f"[improver] modules unavailable ({e})")
+        return
+    for pass_i in range(max_passes):
+        probe = probe_mix(args.out, args.timeline)
+        print(f"[improver] pass {pass_i + 1}: severity={probe['overall_severity']:.2f} "
+              f"verdict={probe['verdict']}")
+        if probe['overall_severity'] < threshold:
+            print(f"[improver] severity {probe['overall_severity']:.2f} < threshold "
+                  f"{threshold:.2f}; done")
+            break
+        with open(args.timeline) as f:
+            blob = _json.load(f)
+        tl = blob['timeline'] if isinstance(blob, dict) else blob
+        report = improve_timeline(tl, probe)
+        print(f"[improver] {len(report.edits)} edit(s), "
+              f"{report.issues_skipped} skipped")
+        for ed in report.edits:
+            print(f"  j{ed.junction_index} {ed.action}: {ed.rationale}")
+        if not report.edits:
+            print("[improver] no actionable edits; stopping")
+            break
+        touched = apply_edits(tl, report.edits)
+        edited_path = args.timeline.replace('.json', f'.improved{pass_i + 1}.json')
+        if isinstance(blob, dict):
+            blob['timeline'] = tl
+            blob.setdefault('meta', {})['improver_touched'] = touched
+            blob['meta'][f'improver_pass_{pass_i + 1}'] = report.to_dict()
+            _json.dump(blob, open(edited_path, 'w'), indent=2)
+        else:
+            _json.dump(tl, open(edited_path, 'w'), indent=2)
+        # Cascade re-render: touched segments + 1 either side. For now just
+        # re-execute the whole edited timeline (simpler; planner-stage
+        # surgical re-render is P2).
+        out_improved = args.out.replace('.wav', f'.improved{pass_i + 1}.wav')
+        execute(edited_path, args.cache, out_improved, args.samples)
+        args.timeline = edited_path
+        args.out = out_improved
+    print(f"[improver] final mix: {args.out}")
 
 
 def cmd_master(args: argparse.Namespace) -> None:
@@ -345,6 +396,10 @@ def main() -> None:
     p.add_argument('--cache', default='cache')
     p.add_argument('--out', default='output/raw_mix.wav')
     p.add_argument('--samples', default='samples')
+    p.add_argument('--improve_max_passes', type=int, default=0,
+                   help='Probe→improver passes after initial render (0=off, 1+ enable)')
+    p.add_argument('--improve_threshold', type=float, default=0.5,
+                   help='Stop when overall_severity below this')
     p.set_defaults(func=cmd_execute)
 
     p = sub.add_parser('master')

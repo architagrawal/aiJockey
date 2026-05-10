@@ -9,6 +9,7 @@ than ship a clashing mix.
 """
 from __future__ import annotations
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -151,6 +152,69 @@ def check_accent_budget(timeline: list[dict],
     return out
 
 
+def check_pool_coherence(timeline: list[dict],
+                          clips_meta: dict[str, dict],
+                          cache_dir: str | None = None,
+                          max_centroid_distance: float = 0.45
+                          ) -> list[Violation]:
+    """Warn when picked clips' CLAP embeddings spread too wide.
+
+    Computes centroid of clap embeddings of clips appearing in the timeline,
+    flags any clip whose cosine distance to centroid exceeds threshold.
+    Catches the failure mode where a planner forces a stylistically-
+    incompatible library clip into the mix to satisfy `min_unique_clips`
+    (verified on v6_libaug: chillstep + dnb + trap + hip_hop + house in
+    one mix produced 0.94 probe severity).
+
+    Severity = warn (not reject) — the planner can still proceed but should
+    reconsider via re-pick or library-clip swap.
+    """
+    if not clips_meta:
+        return []
+    try:
+        import numpy as np
+    except ImportError:
+        return []
+    used_ids = sorted({e.get('clip_id') for e in timeline if e.get('clip_id')})
+    if len(used_ids) < 3:
+        return []  # need ≥3 clips to assess pool spread
+    embs: dict[str, 'np.ndarray'] = {}
+    for cid in used_ids:
+        if cache_dir is None:
+            continue
+        npz_p = (Path(cache_dir) / f'{cid}.npz') if cache_dir else None
+        try:
+            from pathlib import Path as _P  # local for type
+            with np.load(str(npz_p)) as d:
+                if 'clap' in d:
+                    e = np.asarray(d['clap'], dtype=np.float32).reshape(-1)
+                    if e.size:
+                        embs[cid] = e
+        except Exception:
+            continue
+    if len(embs) < 3:
+        return []
+    stacked = np.stack(list(embs.values()))
+    centroid = stacked.mean(axis=0)
+    cnorm = float(np.linalg.norm(centroid)) + 1e-9
+    out: list[Violation] = []
+    outliers: list[tuple[str, float]] = []
+    for cid, e in embs.items():
+        sim = float((e @ centroid) / (np.linalg.norm(e) * cnorm + 1e-9))
+        dist = 1.0 - sim
+        if dist > max_centroid_distance:
+            outliers.append((cid, dist))
+    if outliers:
+        outliers.sort(key=lambda x: -x[1])
+        det = ', '.join(f'{c[:30]}(d={d:.2f})' for c, d in outliers[:3])
+        out.append(Violation(
+            rule='pool_coherence', junction_index=-1,
+            detail=f'{len(outliers)} stylistic outlier(s): {det}',
+            severity='warn',
+        ))
+    return out
+
+
 def check_user_clip_floor(timeline: list[dict],
                            clips_meta: dict[str, dict]) -> list[Violation]:
     """Every user-source clip must appear in at least one timeline segment.
@@ -176,7 +240,8 @@ def check_user_clip_floor(timeline: list[dict],
 
 
 def validate(timeline: list[dict],
-             clips_meta: dict[str, dict] | None = None) -> list[Violation]:
+             clips_meta: dict[str, dict] | None = None,
+             cache_dir: str | None = None) -> list[Violation]:
     """Run all rules. Returns ordered list of violations."""
     clips_meta = clips_meta or {}
     out: list[Violation] = []
@@ -187,6 +252,7 @@ def validate(timeline: list[dict],
     out += check_key_compat_for_long_blends(timeline)
     out += check_accent_budget(timeline)
     out += check_user_clip_floor(timeline, clips_meta)
+    out += check_pool_coherence(timeline, clips_meta, cache_dir=cache_dir)
     return out
 
 
