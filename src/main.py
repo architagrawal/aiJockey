@@ -142,6 +142,39 @@ def cmd_plan(args: argparse.Namespace) -> None:
         if accents:
             attach_accent_hints(tl, accents)
             print(f"[director] attached {len(accents)} accent hints")
+
+    # User-clip floor: every source='user' clip MUST appear at least once.
+    # Post-plan injection — swaps any missing user clip into a non-user slot.
+    if not getattr(args, 'no_user_floor', False):
+        try:
+            user_ids = sorted(cid for cid, m in clips.items()
+                              if (m.get('source') or '').lower() == 'user')
+            present = {e.get('clip_id') for e in tl}
+            missing = [c for c in user_ids if c not in present]
+            if missing and tl:
+                from planner import pick_segment as _pick
+                non_user_entries = [
+                    (i, e) for i, e in enumerate(tl)
+                    if (clips.get(e.get('clip_id'), {})
+                        .get('source') or '').lower() != 'user'
+                ]
+                for cid in missing:
+                    if not non_user_entries:
+                        print(f"[user_floor] no swap slot for {cid[:40]}")
+                        break
+                    swap_i, swap_e = non_user_entries.pop(0)
+                    seg, sidx = _pick(clips[cid], min_seconds=20.0)
+                    new_entry = dict(swap_e)
+                    new_entry['clip_id'] = cid
+                    new_entry['segment'] = seg
+                    new_entry['_user_floor_swapped_from'] = swap_e.get('clip_id')
+                    tl[swap_i] = new_entry
+                    print(f"[user_floor] swap j{swap_i}: "
+                          f"{(swap_e.get('clip_id') or '?')[:40]} -> "
+                          f"{cid[:40]} (segment {sidx})")
+        except Exception as _e:
+            print(f"[user_floor] skipped ({_e})")
+
     # Stamp meta so cmd_execute + probe_log can recover prompt/arc/mix_mode
     # (was showing "unknown" in by_arc/by_mode summarize buckets).
     plan_meta = {
@@ -463,6 +496,9 @@ def main() -> None:
     p.add_argument('--reuse_cooldown', type=int, default=5,
                    help='Min entries between reuses of same clip. Lower = '
                         'more A-B-A revisits allowed.')
+    p.add_argument('--no_user_floor', action='store_true',
+                   help='Disable user-clip floor (default: every source=user '
+                        'clip must appear at least once).')
     p.add_argument('--max_clips', type=int, default=200)
     p.add_argument('--min_unique_clips', type=int, default=5,
                    help='min distinct clips that must appear in mix')
@@ -527,6 +563,9 @@ def main() -> None:
     p.add_argument('--reuse_cooldown', type=int, default=5,
                    help='Min entries between reuses of same clip. Lower = '
                         'more A-B-A revisits allowed.')
+    p.add_argument('--no_user_floor', action='store_true',
+                   help='Disable user-clip floor (default: every source=user '
+                        'clip must appear at least once).')
     p.add_argument('--max_clips', type=int, default=200)
     p.add_argument('--min_unique_clips', type=int, default=5,
                    help='min distinct clips that must appear in mix')
