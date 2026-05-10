@@ -134,17 +134,68 @@ def _batch_clap(audio_paths: list[Path]):
     return out
 
 
+def _batch_demucs(analyzer, audio_paths: list[Path], micro_batch: int = 4):
+    """Batched Demucs stems across `micro_batch` clips per GPU forward.
+
+    Returns list[dict[stem_name -> torch.Tensor]] aligned with audio_paths,
+    None entries for clips that failed to load.
+
+    micro_batch=4 is the sweet spot on MI300X 192GB for htdemucs_ft at 44.1kHz
+    — beyond that pad-to-longest dominates and you waste VRAM on zeros.
+    Override with AIJOCKEY_DEMUCS_BATCH.
+    """
+    import os as _os
+    micro_batch = int(_os.environ.get('AIJOCKEY_DEMUCS_BATCH', str(micro_batch)))
+    micro_batch = max(1, micro_batch)
+    if not hasattr(analyzer, 'stems_batch'):
+        return [None] * len(audio_paths)
+    try:
+        out: list = []
+        i = 0
+        while i < len(audio_paths):
+            chunk = audio_paths[i:i + micro_batch]
+            wavs = []
+            valid_mask = []
+            for p in chunk:
+                try:
+                    wavs.append(analyzer.load(str(p)))
+                    valid_mask.append(True)
+                except Exception as e:
+                    print(f"warn: load {p} for batched demucs: {e}")
+                    valid_mask.append(False)
+            valid_wavs = [w for w, m in zip(wavs, valid_mask) if m]
+            if not valid_wavs:
+                out.extend([None] * len(chunk))
+                i += micro_batch
+                continue
+            stems_list = analyzer.stems_batch(valid_wavs)
+            it = iter(stems_list)
+            for m in valid_mask:
+                out.append(next(it) if m else None)
+            i += micro_batch
+        return out
+    except Exception as e:
+        print(f"warn: batched demucs failed ({e}); per-clip fallback")
+        return [None] * len(audio_paths)
+
+
 def process_batch(audio_paths: list[Path]) -> int:
     """Batched entry point.
 
-    Strategy: CLAP is the only HF-model step that can be safely
-    cross-clip batched (variable-length OK via processor padding).
-    Demucs/madmom/librosa beats remain per-clip — they have intrinsic
-    variable-length pipelines and small batches don't help on GPU.
-    Pre-batching CLAP eliminates the per-clip CLAP forward (~1-2s) and
-    is the largest single win for stage1 throughput.
+    Strategy:
+      - CLAP: cross-clip batched in single GPU forward (variable-len padded).
+      - Demucs: micro-batched (default 4 clips/forward) via Analyzer.stems_batch
+        to lift GPU util from <5% (sequential 1-clip) toward >50% on MI300X.
+      - madmom/beat_this/librosa: per-clip (intrinsically variable-length).
 
-    Disable with AIJOCKEY_BATCH_CLAP=0 to fall back to per-clip path.
+    Pre-batching the two heavy GPU steps (CLAP + Demucs) is the dominant cost
+    on stage1, so we cover both. Per-clip metadata work (key, sections, hooks)
+    stays serial — those steps are CPU-bound and tiny.
+
+    Env knobs:
+      AIJOCKEY_BATCH_CLAP=0     disable batched CLAP (fall back to per-clip)
+      AIJOCKEY_BATCH_DEMUCS=0   disable batched Demucs (fall back to per-clip)
+      AIJOCKEY_DEMUCS_BATCH=N   override micro-batch size (default 4)
     """
     if not audio_paths:
         return 0
@@ -163,17 +214,28 @@ def process_batch(audio_paths: list[Path]) -> int:
     use_batch = os.environ.get('AIJOCKEY_BATCH_CLAP', '1') != '0'
     claps = _batch_clap(work) if use_batch else [None] * len(work)
 
+    use_batch_demucs = os.environ.get('AIJOCKEY_BATCH_DEMUCS', '1') != '0'
+    demucs_stems = (_batch_demucs(analyzer, work)
+                    if use_batch_demucs else [None] * len(work))
+
     ok = 0
-    for p, cid, c in zip(work, cids, claps):
+    for p, cid, c, pre_stems in zip(work, cids, claps, demucs_stems):
         print(f"S1 analyze {p.name} -> {cid}")
-        if _run_single(analyzer, p, cid, precomputed_clap=c):
-            ok += 1
+        # Inject pre-computed stems via a thread-local-style attribute that
+        # Analyzer.analyze can pick up — kept backwards-compatible by
+        # falling through to per-clip stems() when attr is None.
+        analyzer._pre_stems = pre_stems  # type: ignore[attr-defined]
+        try:
+            if _run_single(analyzer, p, cid, precomputed_clap=c):
+                ok += 1
+        finally:
+            analyzer._pre_stems = None  # type: ignore[attr-defined]
     return ok
 
 
 def watch_loop(raw_root: Path, interval: float = 30.0,
                extensions: tuple[str, ...] = ('.mp3', '.wav', '.flac', '.m4a', '.ogg'),
-               batch_size: int = 16,
+               batch_size: int = 64,
                ) -> None:
     print(f"S1 watching {raw_root}, batch_size={batch_size}, every {interval}s")
     while True:

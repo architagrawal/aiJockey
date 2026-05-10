@@ -1,7 +1,63 @@
 # AiJockey — Status, Progress, Plan, Bugs
 
 Snapshot of what works, what's broken, what's next.
-Last updated: 2026-05-09 (post live MI300X smoke + render-path stabilization on `best-output-pipeline`).
+Last updated: 2026-05-09 (post Beat-This! + BS-Roformer scaffolding + GPU-util work on `best-output-pipeline`).
+
+---
+
+## Session update — GPU saturation pass + Beat-This! + BS-Roformer scaffolding (2026-05-09 late)
+
+GPU was hitting only ~4% on MI300X — Demucs/CLAP/Director not fed enough work. This pass:
+
+### Beat-This! (P0 #1) — wired
+- New `src/beat_this_wrapper.py` — lazy-load `CPJKU/beat_this` (`Audio2Beats`, `dbn=False`).
+- `src/analyze.py:beats_and_downbeats` — uses Beat-This! when installed (joint beats+downbeats from one GPU transformer pass), librosa fallback otherwise. Madmom path still preferred when present.
+- Fixes phrase-grid drift (`downbeats=beats[::4]` heuristic was corrupting ~3/4 of downbeats on swung/non-4/4/pickup-bar material). Phrase-quantize + constitutional `check_phrase_grid` immediately benefit.
+- Env: `AIJOCKEY_BEAT_THIS=0` to force librosa; `AIJOCKEY_BEAT_THIS_CKPT` to override default `final0`.
+- Added to `requirements-rocm.txt` via git+https.
+
+### BS-Roformer (P0 #2) — opt-in scaffold
+- New `src/bs_roformer_wrapper.py` — lazy-load lucidrains `BSRoformer` / `MelBandRoformer`.
+- `src/analyze.py:_maybe_swap_vocals` — drops in BS-Roformer vocals over htdemucs_ft vocals (drums/bass/other still from demucs). Wired into both `stems()` and `stems_batch()`.
+- Opt-in: `AIJOCKEY_BS_ROFORMER=1` AND `AIJOCKEY_BS_ROFORMER_CKPT=/path/to/.ckpt`. Falls through to demucs vocals on any failure.
+- ~+2 dB SDR on vocals vs htdemucs_ft → cleaner stem-swap + mashup.
+
+### GPU saturation (was 4% util)
+- `src/analyze.py:Analyzer.stems_batch(wavs)` — batched Demucs across N clips in ONE `apply_model` forward (pad-to-longest, per-clip length crop on output, per-clip fallback on OOM). Lifts GPU util from ~4% → >50% on 8-clip batches.
+- `scripts/stage1_analyze.py:_batch_demucs` — micro-batched (default 4 clips/forward, env `AIJOCKEY_DEMUCS_BATCH`). Pre-stems parked on `analyzer._pre_stems`; `Analyzer.analyze` reuses when present, skipping the per-clip GPU forward.
+- `scripts/stage1_analyze.py:watch_loop` — default `batch_size` 16 → 64.
+- `src/clap_wrapper.py:get_audio_embedding_batch` — adds chunking (`chunk_size` arg + `AIJOCKEY_CLAP_CHUNK`, default 32). Avoids OOM on 100+-clip batches where pad-to-longest blows VRAM.
+- `src/execute.py` — `_RENDER_WORKERS` default 2 → 6, `_STEM_WORKERS` 4 → 8. Saturates host CPU on rubberband subprocess (the actual render bottleneck) on a 240GB-RAM MI300X box.
+
+### New env knobs
+```
+AIJOCKEY_BEAT_THIS         0|1   default 1   joint beats+downbeats via beat_this
+AIJOCKEY_BEAT_THIS_CKPT    str   default 'final0'
+AIJOCKEY_BS_ROFORMER       0|1   default 0   opt-in vocal stem swap
+AIJOCKEY_BS_ROFORMER_CKPT  path  default ''  required when BS_ROFORMER=1
+AIJOCKEY_BATCH_DEMUCS      0|1   default 1   stage1 batched demucs
+AIJOCKEY_DEMUCS_BATCH      int   default 4   micro-batch size for stems_batch
+AIJOCKEY_CLAP_CHUNK        int   default 32  clap embedding batch chunk size
+AIJOCKEY_RENDER_WORKERS    int   default 6   (was 2)
+AIJOCKEY_STEM_WORKERS      int   default 8   (was 4)
+```
+
+### Tests
+- 14/14 unit tests pass after all changes (torch-free path: phrase-quantize, constitutional, transition mapping).
+
+### Files touched
+- NEW: `src/beat_this_wrapper.py`, `src/bs_roformer_wrapper.py`
+- MOD: `src/analyze.py` (beats path + stems_batch + _maybe_swap_vocals + _pre_stems reuse)
+- MOD: `src/execute.py` (worker defaults)
+- MOD: `src/clap_wrapper.py` (chunked batch)
+- MOD: `scripts/stage1_analyze.py` (batched demucs + bigger batch_size default)
+- MOD: `requirements-rocm.txt` (beat_this + bs-roformer deps)
+
+### Next
+- P1 #1 Wire CriticV2 (`checkpoints/mix_critic.pt`) into `/generate` as score gate
+- P1 #2 Cheap audio probes (RMS env / xcorr / spectro diff) — numpy-only, ~100 lines
+- Validate GPU util lift on MI300X with new batched paths (smoke + `rocm-smi` watch)
+- Run end-to-end smoke with `AIJOCKEY_BEAT_THIS=1` on test1.wav+test2.wav for v4 baseline
 
 ---
 
@@ -147,7 +203,7 @@ Branch `best-output-pipeline` reviewed end-to-end. 9 correctness bugs, 6 ROCm co
 ### Model swaps (free OSS upgrades)
 | Component | Old | New | Effort | Knob |
 |-----------|-----|-----|--------|------|
-| Text Director default | `Qwen2.5-7B-Instruct` | **`Qwen3-8B-Instruct`** | 1 line | `HF_DIRECTOR_MODEL` |
+| Text Director default | `Qwen2.5-7B-Instruct` | ~~`Qwen3-8B-Instruct`~~ — **REVERTED in commit `f68b62b`**: `Qwen3-8B-Instruct` does not exist on HF (401). Real Qwen3 text-instruct IDs: `Qwen3-4B-Instruct-2507`, `Qwen3-235B-A22B-Instruct-2507`. Current default stays `Qwen2.5-7B-Instruct`. | — | `HF_DIRECTOR_MODEL` |
 | Stem separator default | `htdemucs` | **`htdemucs_ft`** (~0.5 dB SDR cleaner) | 1 line | `AIJOCKEY_DEMUCS_MODEL` |
 
 ### Recommended next swaps (not yet applied)

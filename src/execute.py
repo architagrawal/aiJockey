@@ -30,11 +30,12 @@ SR = 44100
 # pyrubberband shells out to the rubberband CLI which is single-threaded
 # per invocation but releases the GIL — N independent stems can run
 # concurrently. cap at 4 (= stem count) to avoid oversubscription.
-_STEM_WORKERS = max(1, min(4, int(os.environ.get('AIJOCKEY_STEM_WORKERS', '4'))))
+_STEM_WORKERS = max(1, min(8, int(os.environ.get('AIJOCKEY_STEM_WORKERS', '8'))))
 # Allow rendering multiple timeline segments concurrently. Each segment
-# allocates ~200MB of PCM at 600s/2ch/float32; default 2 keeps peak RSS
-# bounded while doubling render throughput vs serial.
-_RENDER_WORKERS = max(1, min(8, int(os.environ.get('AIJOCKEY_RENDER_WORKERS', '2'))))
+# allocates ~200MB of PCM at 600s/2ch/float32; default 6 saturates the MI300X
+# host CPU (which is what bottlenecks the rubberband subprocess) without
+# blowing peak RSS on a 240GB-RAM box. Drop to 2 only on RAM-constrained envs.
+_RENDER_WORKERS = max(1, min(16, int(os.environ.get('AIJOCKEY_RENDER_WORKERS', '6'))))
 
 # CUDA/ROCm autotuner: lets cuDNN/MIOpen pick fastest conv algos for the
 # fixed input shapes seen in this pipeline. Idempotent + harmless on CPU.

@@ -61,7 +61,8 @@ def load_clap() -> None:
     raise RuntimeError('No CLAP backend available. Install laion-clap or transformers.')
 
 
-def get_audio_embedding_batch(audios_48k: list[np.ndarray]) -> np.ndarray:
+def get_audio_embedding_batch(audios_48k: list[np.ndarray],
+                               chunk_size: int | None = None) -> np.ndarray:
     """Batched CLAP audio embeddings.
 
     Input: list of 1-D float32 mono arrays at 48 kHz (variable length OK
@@ -72,12 +73,28 @@ def get_audio_embedding_batch(audios_48k: list[np.ndarray]) -> np.ndarray:
     Single GPU forward across N clips is ~Nx faster than N separate
     forwards on the transformers backend. The laion-clap path stacks
     via the library's native batched API.
+
+    Chunking: when chunk_size is set (or env AIJOCKEY_CLAP_CHUNK), split N
+    into chunks of that size. Avoids OOM on 100+ clip batches where pad-to-
+    longest blows up VRAM (1 long clip drags the whole batch's tensor size).
+    Default 32 — sweet spot for MI300X 192GB on htsat 60s windows.
     """
     if not audios_48k:
         return np.zeros((0, 512), dtype=np.float32)
     load_clap()
     audios = [a.astype(np.float32) if a.ndim == 1 else a[0].astype(np.float32)
               for a in audios_48k]
+
+    import os as _os
+    if chunk_size is None:
+        chunk_size = int(_os.environ.get('AIJOCKEY_CLAP_CHUNK', '32'))
+    chunk_size = max(1, chunk_size)
+    if len(audios) > chunk_size:
+        embs: list[np.ndarray] = []
+        for i in range(0, len(audios), chunk_size):
+            embs.append(get_audio_embedding_batch(audios[i:i + chunk_size],
+                                                   chunk_size=chunk_size))
+        return np.concatenate(embs, axis=0)
 
     if _BACKEND == 'laion':
         # laion-clap accepts (N, T) — pad to longest with zeros.

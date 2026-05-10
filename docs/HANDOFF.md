@@ -71,7 +71,7 @@ Resume reference for next conversation. Read this first to recover full context.
 
 | Issue | Where | Severity |
 |---|---|---|
-| Downbeat heuristic `beats[::4]` (madmom unavailable, librosa fallback) → phrase-grid drift 200-600 ms | `src/analyze.py:beats_and_downbeats` | medium — phrase-quantize repairs but Beat-This! is the real fix |
+| ~~Downbeat heuristic `beats[::4]`~~ — RESOLVED via Beat-This! integration (`src/beat_this_wrapper.py`); librosa stays as last-resort fallback | `src/analyze.py:beats_and_downbeats` | **resolved** (validate on MI300X) |
 | Audio Director path exists but capped at 6 user clips × 30 s window | `src/director.py:_call_qwen2audio` | low — documented in AGENTS.md |
 | Qwen3-8B-Instruct ID does not exist on HF | reverted in `f68b62b` | resolved |
 | htdemucs_ft + torch.compile = crash | guard added in `aeb75ac` | resolved |
@@ -82,20 +82,13 @@ Resume reference for next conversation. Read this first to recover full context.
 
 ## Next tasks (priority order)
 
-### P0 — biggest perceived-quality lever
+### P0 — DONE this session (validate on MI300X)
 
-**1. Beat-This! integration** (~30 lines, ~1 hr)
-- Repo: `CPJKU/beat_this`, MIT, PyTorch
-- Replace `madmom.RNNBeatProcessor` + librosa fallback in `src/analyze.py:beats_and_downbeats()`
-- Joint beats + downbeats from one transformer pass
-- **Fixes phrase-grid drift directly** (current heuristic `beats[::4]` corrupts ~3/4 of downbeats on swung/non-4/4 material)
-- Existing constitutional `check_phrase_grid` + `quantize_timeline_to_phrase` immediately benefit
+**1. Beat-This! integration** — DONE (`src/beat_this_wrapper.py`, wired into `Analyzer.beats_and_downbeats`). `AIJOCKEY_BEAT_THIS=1` (default). Falls through to librosa. Need MI300X smoke to confirm phrase-grid drift gone.
 
-**2. BS-Roformer / Mel-Band Roformer for vocal stem** (~80 lines + checkpoint mgmt)
-- Repo: `lucidrains/BS-RoFormer` or UVR (Ultimate Vocal Remover) checkpoints, MIT
-- Vocals SDR ~9 → ~11 dB
-- Drop-in for `Analyzer.stems()` — wrap to expose `.segment` attr like demucs does
-- Cleaner vocal stems → cleaner stem-swap, better mashup feel
+**2. BS-Roformer for vocal stem** — SCAFFOLD DONE (`src/bs_roformer_wrapper.py`, `Analyzer._maybe_swap_vocals`). Opt-in: `AIJOCKEY_BS_ROFORMER=1` + `AIJOCKEY_BS_ROFORMER_CKPT=/path`. drums/bass/other still demucs. Need to download a vocals checkpoint + smoke.
+
+**GPU saturation pass** — DONE. GPU was 4% util; new batched-Demucs path (`stems_batch`), stage1 micro-batching (default 4 clips/forward), CLAP chunking, bumped `_RENDER_WORKERS` 2→6 + `_STEM_WORKERS` 4→8. Need MI300X `rocm-smi` watch on next run to measure lift.
 
 ### P1 — UX completion + observability
 

@@ -93,7 +93,22 @@ class Analyzer:
                 beats_per_bar=[3, 4], fps=100)
             self.use_madmom = True
         except Exception as e:
-            print(f"[analyze] madmom unavailable ({e.__class__.__name__}); using librosa beat fallback")
+            print(f"[analyze] madmom unavailable ({e.__class__.__name__}); checking beat_this")
+        # Beat-This! check: only when madmom missing (madmom is more accurate
+        # on Western popular music when it loads, but it's Python-3.10 broken
+        # in our env). beat_this is GPU-friendly + joint beats+downbeats.
+        self._use_beat_this = False
+        if not self.use_madmom:
+            try:
+                from beat_this_wrapper import available as _bt_avail, _load as _bt_load
+                if _bt_avail():
+                    _bt_load(device=self.device)
+                    self._use_beat_this = True
+                    print(f"[analyze] beats: beat_this ({self.device})")
+                else:
+                    print("[analyze] beats: librosa fallback (beat_this not installed)")
+            except Exception as e:
+                print(f"[analyze] beats: librosa fallback (beat_this load: {e})")
 
     def load(self, path: str) -> torch.Tensor:
         wav, sr = torchaudio.load(path)
@@ -104,6 +119,29 @@ class Analyzer:
         elif wav.size(0) > 2:
             wav = wav[:2]
         return wav
+
+    def _maybe_swap_vocals(self, wav: torch.Tensor,
+                            stems: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Replace the demucs vocals stem with BS-Roformer output when enabled.
+
+        BS-Roformer (or Mel-Band Roformer) yields ~+2 dB SDR on vocals vs
+        htdemucs_ft. drums/bass/other still come from demucs (BS-Roformer is
+        a vocals-only architecture in the published checkpoints).
+        """
+        try:
+            from bs_roformer_wrapper import enabled as _bsr_enabled, vocals_from_wav
+        except Exception:
+            return stems
+        if not _bsr_enabled():
+            return stems
+        new_vox = vocals_from_wav(wav, sr=SR, device=self.device)
+        if new_vox is None:
+            return stems
+        # Crop/pad to match other stems' length (rounding may differ ±few samples).
+        ref_len = min(s.shape[-1] for s in stems.values())
+        v = new_vox[:, :ref_len] if new_vox.size(-1) >= ref_len else new_vox
+        stems['vocals'] = v
+        return stems
 
     def stems(self, wav: torch.Tensor) -> dict[str, torch.Tensor]:
         from demucs.apply import apply_model
@@ -122,10 +160,71 @@ class Analyzer:
                                           overlap=ov)[0]
             else:
                 sources = apply_model(self.demucs, x, split=True, overlap=ov)[0]
-        return {n: sources[i].cpu() for i, n in enumerate(self.demucs.sources)}
+        out = {n: sources[i].cpu() for i, n in enumerate(self.demucs.sources)}
+        return self._maybe_swap_vocals(wav, out)
+
+    def stems_batch(self, wavs: list[torch.Tensor]) -> list[dict[str, torch.Tensor]]:
+        """Batched Demucs across N clips.
+
+        Pads to longest, runs ONE apply_model call, slices back per-clip. On a
+        192GB MI300X this lifts GPU util from ~4% (sequential 1-clip) to >50%
+        on 8-clip batches with htdemucs_ft. Variable lengths handled by zero-pad
+        + per-clip length crop on output.
+
+        Falls back to per-clip stems() loop if any single batched forward
+        fails (e.g. OOM on extreme outliers — pad to longest hurts when one
+        clip is 10× others).
+        """
+        from demucs.apply import apply_model
+        if not wavs:
+            return []
+        if len(wavs) == 1:
+            return [self.stems(wavs[0])]
+        # Pad to longest
+        ch = wavs[0].size(0)
+        T = max(w.size(1) for w in wavs)
+        lengths = [w.size(1) for w in wavs]
+        batch = torch.zeros(len(wavs), ch, T, dtype=wavs[0].dtype)
+        for i, w in enumerate(wavs):
+            batch[i, :, :w.size(1)] = w
+        ov = float(os.environ.get('AIJOCKEY_DEMUCS_OVERLAP', '0.10'))
+        try:
+            with torch.inference_mode():
+                x = batch.to(self.device)
+                if self.device == 'cuda' and self._compute_dtype != torch.float32:
+                    with torch.amp.autocast(device_type='cuda',
+                                             dtype=self._compute_dtype):
+                        sources = apply_model(self.demucs, x, split=True, overlap=ov)
+                else:
+                    sources = apply_model(self.demucs, x, split=True, overlap=ov)
+            # sources: (B, S, C, T)
+            names = list(self.demucs.sources)
+            out: list[dict[str, torch.Tensor]] = []
+            for b, n_samples in enumerate(lengths):
+                d: dict[str, torch.Tensor] = {}
+                for s, name in enumerate(names):
+                    d[name] = sources[b, s, :, :n_samples].cpu()
+                out.append(self._maybe_swap_vocals(wavs[b], d))
+            return out
+        except Exception as e:
+            print(f"[analyze] batched stems failed ({e}); per-clip fallback")
+            return [self.stems(w) for w in wavs]
 
     def beats_and_downbeats(self, wav: torch.Tensor) -> tuple[float, list[float], list[float]]:
         mono = wav.mean(0).numpy().astype(np.float32)
+        # Beat-This! (P0): joint beats + downbeats from a single GPU transformer
+        # pass. Replaces the librosa fallback `downbeats = beats[::4]` heuristic
+        # which corrupts 3/4 of downbeats on swung / non-4/4 / pickup-bar material
+        # and is the upstream cause of phrase-grid drift documented in HANDOFF.
+        if not self.use_madmom and getattr(self, '_use_beat_this', False):
+            try:
+                from beat_this_wrapper import beats_from_array
+                return beats_from_array(mono, SR, device=self.device)
+            except Exception as e:
+                # Fall through to librosa on first-call failure; cache flag so
+                # we don't repeatedly retry per clip.
+                print(f"[analyze] beat_this fallback ({e.__class__.__name__}: {e})")
+                self._use_beat_this = False
         if self.use_madmom:
             beat_act = self.beat_proc(mono)
             beats = [float(t) for t in self.beat_track(beat_act)]
@@ -135,7 +234,7 @@ class Analyzer:
         else:
             tempo_lr, beat_frames = librosa.beat.beat_track(y=mono, sr=SR, units='time')
             beats = [float(t) for t in beat_frames]
-            # downbeat heuristic: every 4th beat (assume 4/4)
+            # downbeat heuristic: every 4th beat (assume 4/4) — last-resort fallback
             downbeats = beats[::4]
         if len(beats) > 1:
             ibis = np.diff(beats)
@@ -230,8 +329,14 @@ class Analyzer:
     def analyze(self, path: str, clip_id: str, cache_dir: Path,
                 precomputed_clap: np.ndarray | None = None) -> ClipAnalysis:
         wav = self.load(path)
-        # Stems (slow)
-        stems = self.stems(wav)
+        # Stems (slow). If caller pre-batched stems via stems_batch() and
+        # parked them on `_pre_stems`, reuse — saves the per-clip GPU forward
+        # which is the largest single cost on stage1.
+        pre = getattr(self, '_pre_stems', None)
+        if pre is not None and isinstance(pre, dict) and pre:
+            stems = pre
+        else:
+            stems = self.stems(wav)
         stems_dir = cache_dir / 'stems' / clip_id
         stems_dir.mkdir(parents=True, exist_ok=True)
         for name, s in stems.items():
