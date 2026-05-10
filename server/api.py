@@ -332,6 +332,7 @@ def library_clip_paths_clap(centroid, count: int,
                               bpm_tol_pct: float = 30.0,
                               user_keys: list[str] | None = None,
                               user_clap_embs: list = None,
+                              user_vocal_activity_mean: float | None = None,
                               ) -> list[Path]:
     """Pick top-`count` library clips by COMPOSITE score combining:
 
@@ -425,11 +426,55 @@ def library_clip_paths_clap(centroid, count: int,
             return -0.4 * (0.55 - max_sim) / 0.55
         return 0.0
 
-    # Weights — tuned for "prefer cohesive over diverse".
+    def _vocal_balance_bonus(lib_va: float, user_va_mean: float | None) -> float:
+        """Reward picks that BALANCE pool vocal density.
+        - User pool vocal-heavy (>0.5)  → bonus for low-VA (instrumental) lib clips.
+        - User pool instrumental (<0.3) → bonus for high-VA lib clips.
+        - Mid pool (0.3..0.5)           → no bias, both welcome.
+        Bonus magnitude scales with imbalance + lib VA distance from pool.
+        """
+        if user_va_mean is None or lib_va < 0:
+            return 0.0
+        if user_va_mean > 0.5:
+            return max(0.0, (0.5 - lib_va)) * 0.6
+        if user_va_mean < 0.3:
+            return max(0.0, (lib_va - 0.3)) * 0.6
+        return 0.0
+
+    def _section_coverage_bonus(lib_meta: dict) -> float:
+        """Bonus for clips with drop / break / breakdown sections —
+        Director needs them to pick aggressive transitions on inst junctions."""
+        secs = lib_meta.get('sections') or []
+        useful = {'drop', 'break', 'breakdown', 'bridge', 'solo'}
+        for s in secs:
+            t = (s.get('type') or s.get('label') or '').lower()
+            if t in useful:
+                return 0.15
+        return 0.0
+
+    def _mmr_diversity_penalty(lib_emb, picked_embs: list) -> float:
+        """Penalize candidate similar to already-picked lib clips (MMR).
+        Returns 0 for first pick; up to -0.4 when near-duplicate of prior."""
+        if not picked_embs:
+            return 0.0
+        ln = float(np.linalg.norm(lib_emb)) + 1e-9
+        max_sim = 0.0
+        for pe in picked_embs:
+            pn = float(np.linalg.norm(pe)) + 1e-9
+            s = float((lib_emb @ pe) / (ln * pn))
+            max_sim = max(max_sim, s)
+        if max_sim > 0.85:
+            return -0.4 * (max_sim - 0.85) / 0.15
+        return 0.0
+
+    # Weights — tuned for "prefer cohesive over diverse" + new balance terms.
     A_CLAP = 1.0
     B_KEY = 0.35
     G_BPM = 0.25
     D_OUTLIER = 1.0   # multiplier on already-negative penalty
+    E_VBAL = 1.0      # vocal-balance bonus weight
+    F_COV = 1.0       # section-coverage bonus weight
+    H_MMR = 1.0       # MMR diversity penalty weight
 
     cnorm = float(np.linalg.norm(centroid)) + 1e-9
     candidates: list[tuple[float, Path, dict]] = []
@@ -479,22 +524,57 @@ def library_clip_paths_clap(centroid, count: int,
             key_bonus = _camelot_compat_bonus(lib_key, user_keys or [])
             outlier = _outlier_penalty(a, user_clap_embs or [])
 
-            score = (A_CLAP * sim
-                     + B_KEY * key_bonus
-                     + G_BPM * bpm_score
-                     + D_OUTLIER * outlier)
-            candidates.append((score, p,
+            # Pull lib clip section data for coverage + vocal balance.
+            secs = m.get('sections') or []
+            lib_va_vals = [float(s.get('vocal_activity'))
+                           for s in secs
+                           if s.get('vocal_activity') is not None]
+            lib_va_mean = (sum(lib_va_vals) / len(lib_va_vals)) if lib_va_vals else -1.0
+            vbal = _vocal_balance_bonus(lib_va_mean, user_vocal_activity_mean)
+            coverage = _section_coverage_bonus(m)
+
+            base_score = (A_CLAP * sim
+                          + B_KEY * key_bonus
+                          + G_BPM * bpm_score
+                          + D_OUTLIER * outlier
+                          + E_VBAL * vbal
+                          + F_COV * coverage)
+            candidates.append((base_score, p,
                                {'clap': sim, 'key': key_bonus,
-                                'bpm': bpm_score, 'outlier': outlier}))
+                                'bpm': bpm_score, 'outlier': outlier,
+                                'vbal': vbal, 'cov': coverage,
+                                'emb': a, 'lib_va': lib_va_mean}))
         except Exception:
             continue
+    # MMR greedy selection: at each step pick candidate with best
+    # (base_score + H_MMR * diversity_penalty_vs_already_picked).
+    # Falls back to base-score sort when count >= len(candidates).
     candidates.sort(key=lambda x: -x[0])
+    if candidates and count > 0 and count < len(candidates):
+        picked: list = []
+        picked_embs: list = []
+        remaining = list(candidates)
+        while remaining and len(picked) < count * 3:  # rerank deeper than count
+            best_i, best_adj = 0, -1e9
+            for i, (sc, pp, parts) in enumerate(remaining):
+                mmr = _mmr_diversity_penalty(parts['emb'], picked_embs)
+                adj = sc + H_MMR * mmr
+                if adj > best_adj:
+                    best_adj, best_i = adj, i
+            sc, pp, parts = remaining.pop(best_i)
+            new_parts = dict(parts)
+            new_parts['adj'] = best_adj
+            picked.append((best_adj, pp, new_parts))
+            picked_embs.append(parts['emb'])
+        candidates = picked
     # Telemetry: log top-N picks with score breakdown for debugging.
     try:
         for i, (sc, pp, parts) in enumerate(candidates[:min(count, 5)]):
             print(f"[lib_pick] #{i} {pp.stem[:40]} score={sc:.3f} "
                   f"clap={parts['clap']:.2f} key={parts['key']:+.2f} "
-                  f"bpm={parts['bpm']:.2f} outlier={parts['outlier']:+.2f}")
+                  f"bpm={parts['bpm']:.2f} outlier={parts['outlier']:+.2f} "
+                  f"vbal={parts.get('vbal',0):+.2f} cov={parts.get('cov',0):+.2f} "
+                  f"lib_va={parts.get('lib_va',-1):.2f}")
     except Exception:
         pass
     # Quality gate: if EVERY top candidate scores < threshold, the library
@@ -734,6 +814,7 @@ def _run_generate_sync(
         user_bpms: list[float] = []
         user_keys: list[str] = []
         user_embs: list = []
+        user_va_vals: list[float] = []
         try:
             import numpy as _np
         except Exception:
@@ -748,6 +829,10 @@ def _run_generate_sync(
                     k = cm.get("key")
                     if k and k != "?":
                         user_keys.append(str(k))
+                    for s in (cm.get("sections") or []):
+                        va = s.get("vocal_activity")
+                        if va is not None:
+                            user_va_vals.append(float(va))
                 except Exception:
                     pass
             if _np is not None:
@@ -762,13 +847,15 @@ def _run_generate_sync(
                     except Exception:
                         pass
         user_bpm_mean = (sum(user_bpms) / len(user_bpms)) if user_bpms else None
+        user_va_mean = (sum(user_va_vals) / len(user_va_vals)) if user_va_vals else None
         n_lib = lib_count_for_mode(mix_mode, len(saved_paths),
                                     user_total_sec, float(duration))
         if n_lib > 0:
             centroid = _user_pool_centroid(saved_paths, cache_dir)
             library_picked = library_clip_paths_clap(
                 centroid, n_lib, user_bpm_mean=user_bpm_mean,
-                user_keys=user_keys, user_clap_embs=user_embs)
+                user_keys=user_keys, user_clap_embs=user_embs,
+                user_vocal_activity_mean=user_va_mean)
             if not library_picked:
                 # Two reasons we get []: (1) centroid None — no embeddings
                 # yet; fall back to alphabetical. (2) composite picker
