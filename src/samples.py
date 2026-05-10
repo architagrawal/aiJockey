@@ -7,9 +7,13 @@ Public API:
     get_fx(type, bpm, beats)  -> np.ndarray (2, T)
     list_available_types()    -> list[str]
     SampleBank class          -> manage real samples + synth fallback
+
+Phase A polish: pass allowed_types to gate accent FX category whitelist.
+PHASE1_ALLOWED_TYPES is the Phase A polish whitelist — 6 DJ-FX categories.
 """
 from __future__ import annotations
 import json
+import os
 from pathlib import Path
 import numpy as np
 import torchaudio
@@ -19,17 +23,44 @@ from synth_fx import synthesize, SYNTHESIZERS
 SR = 44100
 
 
+PHASE1_ALLOWED_TYPES = frozenset({
+    'risers',
+    'impacts',
+    'sweeps',
+    'snare_rolls',
+    'hihat_rolls',
+    'sub_drops',
+})
+
+
+def _phase_default_allowed() -> frozenset[str] | None:
+    """Phase 1 = restrict to DJ-FX whitelist; otherwise all types allowed."""
+    if os.getenv('AIJOCKEY_PHASE', '1') == '1':
+        return PHASE1_ALLOWED_TYPES
+    return None
+
+
 class SampleBank:
     """
     Holds real samples loaded from manifest. On request, returns best-matching
     real sample (closest BPM + length) or synthesized fallback.
+
+    allowed_types: if set, only these fx categories are loaded/served. Use
+    PHASE1_ALLOWED_TYPES to gate out novelty/meme samples.
     """
 
-    def __init__(self, samples_dir: str = 'samples'):
+    def __init__(self, samples_dir: str = 'samples',
+                 allowed_types: frozenset[str] | None = None):
         self.samples_dir = Path(samples_dir)
+        if allowed_types is None:
+            allowed_types = _phase_default_allowed()
+        self.allowed_types = allowed_types
         # type -> list of {file, audio, bpm, length_beats, key}
         self.bank: dict[str, list[dict]] = {}
         self._load()
+
+    def _allowed(self, fx_type: str) -> bool:
+        return self.allowed_types is None or fx_type in self.allowed_types
 
     def _load(self) -> None:
         manifest_path = self.samples_dir / 'manifest.json'
@@ -42,6 +73,9 @@ class SampleBank:
             print(f"warn: failed to read {manifest_path}: {e}")
             return
         for entry in manifest:
+            entry_type = entry.get('type')
+            if not self._allowed(entry_type):
+                continue
             fp = self.samples_dir / entry['file']
             if not fp.exists():
                 print(f"warn: sample missing: {fp}")
@@ -57,7 +91,7 @@ class SampleBank:
             except Exception as e:
                 print(f"warn: failed to load {fp}: {e}")
                 continue
-            self.bank.setdefault(entry['type'], []).append({
+            self.bank.setdefault(entry_type, []).append({
                 'file': entry['file'],
                 'audio': wav.numpy().astype(np.float32),
                 'bpm': entry.get('bpm', None),  # can be 'agnostic' or number
@@ -69,21 +103,27 @@ class SampleBank:
         return bool(self.bank.get(fx_type))
 
     def has(self, fx_type: str) -> bool:
-        """True if either real samples OR synth available for this type."""
+        """True if either real samples OR synth available, gated by allowed_types."""
+        if not self._allowed(fx_type):
+            return False
         return self.has_real(fx_type) or fx_type in SYNTHESIZERS
 
     def list_available_types(self) -> list[str]:
-        return sorted(set(list(self.bank.keys()) + list(SYNTHESIZERS.keys())))
+        all_types = set(self.bank.keys()) | set(SYNTHESIZERS.keys())
+        if self.allowed_types is not None:
+            all_types &= set(self.allowed_types)
+        return sorted(all_types)
 
     def get_fx(self, fx_type: str, bpm: float = 128.0,
                beats: float = 1.0,
                prefer_real: bool = True) -> np.ndarray:
         """
         Return FX audio (2, T). Tries real bank first if prefer_real, else synth.
-        Falls back to other source if first choice missing. Returns silence
-        if neither available.
+        Returns silence for disallowed types or when neither source has it.
         """
         target_n = int(beats * 60.0 / max(bpm, 1.0) * SR)
+        if not self._allowed(fx_type):
+            return np.zeros((2, max(1, target_n)), dtype=np.float32)
         if prefer_real and self.has_real(fx_type):
             sample = self._best_match(fx_type, bpm, beats)
             if sample is not None:

@@ -18,9 +18,61 @@ import pyrubberband as pyrb
 
 import transitions as T
 from camelot import semitones_between
+from phrase import snap_to_phrase
 from samples import SampleBank
 
 SR = 44100
+
+
+# ---------------------------------------------------------------------------
+# Phrase quantization
+# ---------------------------------------------------------------------------
+
+def _phrase_bars_for_clip(meta: dict) -> int:
+    """Use detected phrase length if stored, default 8 (Phase A polish).
+
+    Phase A polish snaps to 8-bar boundaries even on 16-bar clips because
+    8-bar resolution gives enough valid junctions while keeping segment
+    selection flexible.
+    """
+    return int(meta.get('phrase_bars', 8))
+
+
+def quantize_timeline_to_phrase(timeline: list[dict],
+                                clips_meta: dict[str, dict],
+                                max_drift_bars: int = 2) -> list[dict]:
+    """Snap each segment's start/end to nearest phrase boundary in clip's
+    downbeats grid. Mutates entries in place and returns same list.
+
+    max_drift_bars: hard limit on how far snap may move a boundary. If the
+    nearest phrase boundary is farther than this, the original time is kept
+    (better unquantized than wrong-section).
+    """
+    for entry in timeline:
+        cid = entry.get('clip_id')
+        seg = entry.get('segment') or {}
+        meta = clips_meta.get(cid) or {}
+        downbeats = meta.get('downbeats') or []
+        if not downbeats or 'start' not in seg or 'end' not in seg:
+            continue
+        bpp = _phrase_bars_for_clip(meta)
+        bpm = float(meta.get('tempo', 120.0)) or 120.0
+        bar_dur = 4.0 * 60.0 / bpm
+        max_drift_sec = max_drift_bars * bar_dur
+
+        orig_start = float(seg['start'])
+        orig_end = float(seg['end'])
+        snap_start = snap_to_phrase(orig_start, downbeats, bars_per_phrase=bpp)
+        snap_end = snap_to_phrase(orig_end, downbeats, bars_per_phrase=bpp)
+
+        if abs(snap_start - orig_start) <= max_drift_sec:
+            seg['start'] = snap_start
+        if abs(snap_end - orig_end) <= max_drift_sec and snap_end > seg['start']:
+            seg['end'] = snap_end
+        seg['phrase_quantized'] = (
+            seg['start'] != orig_start or seg['end'] != orig_end
+        )
+    return timeline
 
 
 # ---------------------------------------------------------------------------
@@ -106,24 +158,84 @@ def render_segment(entry: dict, clips_meta: dict[str, dict],
 # Apply transition between two rendered segments
 # ---------------------------------------------------------------------------
 
-def _suppress_intro_vocals(cur: dict, n_samples: int,
-                           ramp_in_samples: int = 0) -> np.ndarray:
-    """Return a 'full' array where the incoming clip's vocals are silenced
-    for the first n_samples (the overlap window with the outgoing clip),
-    then ramp back to full vocals over ramp_in_samples.
+def _stem_sum(stems: dict[str, np.ndarray], names: tuple[str, ...]) -> np.ndarray | None:
+    """Additively sum the named stems. Returns None if none present."""
+    arrs = [stems[n] for n in names if n in stems]
+    if not arrs:
+        return None
+    target_len = min(a.shape[1] for a in arrs)
+    return sum(a[:, :target_len] for a in arrs).astype(np.float32)
 
-    Prevents two vocal tracks from overlapping during crossfade-style
-    transitions. Drums/bass/other unchanged throughout.
+
+def _suppress_intro_vocals_stemwise(cur: dict, n_samples: int,
+                                     ramp_in_samples: int = 0) -> np.ndarray:
+    """Stem-additive intro mute. Reconstructs cur's overlap region from
+    drums+bass+other stems only — never computes mix-minus-vocals, so no
+    subtraction phase residue. Vocals ramp in after overlap.
     """
+    full = cur['full']
+    stems = cur.get('stems') or {}
+    vox = stems.get('vocals')
+    if vox is None or n_samples <= 0:
+        return full
+    inst = _stem_sum(stems, ('drums', 'bass', 'other'))
+    if inst is None:
+        return full
+    out = full.copy()
+    n_samples = int(min(n_samples, full.shape[1], inst.shape[1]))
+    out[:, :n_samples] = inst[:, :n_samples]
+    if ramp_in_samples > 0:
+        end = min(out.shape[1], n_samples + ramp_in_samples, inst.shape[1])
+        ramp_n = end - n_samples
+        if ramp_n > 0:
+            ramp = np.linspace(0.0, 1.0, ramp_n, dtype=np.float32)
+            inst_seg = inst[:, n_samples:end]
+            vox_seg = vox[:, n_samples:end] if vox.shape[1] >= end else None
+            if vox_seg is not None:
+                out[:, n_samples:end] = inst_seg + vox_seg * ramp
+            else:
+                out[:, n_samples:end] = inst_seg
+    return out
+
+
+def _suppress_outro_vocals_stemwise(output: np.ndarray, prev: dict,
+                                     n_samples: int,
+                                     ramp_out_samples: int = 0) -> np.ndarray:
+    """Stem-additive outro mute. Replaces the last n_samples of output with
+    prev's instrumental stems (drums+bass+other), with a pre-overlap ramp-out
+    of vocals via stem replacement.
+    """
+    stems = prev.get('stems') or {}
+    vox = stems.get('vocals')
+    inst = _stem_sum(stems, ('drums', 'bass', 'other'))
+    if vox is None or inst is None or n_samples <= 0 or output.shape[1] == 0:
+        return output
+    out = output.copy()
+    n_samples = int(min(n_samples, out.shape[1], inst.shape[1]))
+    overlap_start = out.shape[1] - n_samples
+    inst_overlap = inst[:, -n_samples:]
+    out[:, overlap_start:] = inst_overlap
+    if ramp_out_samples > 0:
+        ramp_n = min(ramp_out_samples, overlap_start, inst.shape[1] - n_samples)
+        if ramp_n > 0:
+            ramp = np.linspace(1.0, 0.0, ramp_n, dtype=np.float32)
+            ramp_start = overlap_start - ramp_n
+            inst_pre = inst[:, -(n_samples + ramp_n):-n_samples]
+            vox_pre = vox[:, -(n_samples + ramp_n):-n_samples]
+            out[:, ramp_start:overlap_start] = inst_pre + vox_pre * ramp
+    return out
+
+
+# Legacy subtractive paths kept for A/B comparison via env flag.
+def _suppress_intro_vocals_subtractive(cur: dict, n_samples: int,
+                                        ramp_in_samples: int = 0) -> np.ndarray:
     full = cur['full']
     vox = cur.get('stems', {}).get('vocals')
     if vox is None or n_samples <= 0:
         return full
     n_samples = int(min(n_samples, full.shape[1]))
     out = full.copy()
-    # zero vocals for the overlap window
     out[:, :n_samples] -= vox[:, :n_samples]
-    # ramp back: linearly add vocals over ramp_in_samples after overlap
     if ramp_in_samples > 0:
         end = min(out.shape[1], n_samples + ramp_in_samples)
         ramp_n = end - n_samples
@@ -133,16 +245,9 @@ def _suppress_intro_vocals(cur: dict, n_samples: int,
     return out
 
 
-def _suppress_outro_vocals(output: np.ndarray, prev: dict,
-                           n_samples: int,
-                           ramp_out_samples: int = 0) -> np.ndarray:
-    """Mute the outgoing clip's vocals across the last n_samples of `output`,
-    with a pre-overlap ramp-out over ramp_out_samples so the vocals fade
-    rather than abruptly cut.
-
-    Required because output already contains the rendered prev clip with
-    full vocals. We retroactively subtract them in the overlap region.
-    """
+def _suppress_outro_vocals_subtractive(output: np.ndarray, prev: dict,
+                                        n_samples: int,
+                                        ramp_out_samples: int = 0) -> np.ndarray:
     vox = prev.get('stems', {}).get('vocals')
     if vox is None or n_samples <= 0 or output.shape[1] == 0:
         return output
@@ -169,6 +274,25 @@ def _suppress_outro_vocals(output: np.ndarray, prev: dict,
     return out
 
 
+def _suppress_intro_vocals(cur: dict, n_samples: int,
+                           ramp_in_samples: int = 0) -> np.ndarray:
+    """Dispatch to stem-additive (default) or subtractive (legacy A/B)."""
+    import os
+    if os.getenv('AIJOCKEY_STEM_SWAP', '1') == '0':
+        return _suppress_intro_vocals_subtractive(cur, n_samples, ramp_in_samples)
+    return _suppress_intro_vocals_stemwise(cur, n_samples, ramp_in_samples)
+
+
+def _suppress_outro_vocals(output: np.ndarray, prev: dict,
+                           n_samples: int,
+                           ramp_out_samples: int = 0) -> np.ndarray:
+    """Dispatch to stem-additive (default) or subtractive (legacy A/B)."""
+    import os
+    if os.getenv('AIJOCKEY_STEM_SWAP', '1') == '0':
+        return _suppress_outro_vocals_subtractive(output, prev, n_samples, ramp_out_samples)
+    return _suppress_outro_vocals_stemwise(output, prev, n_samples, ramp_out_samples)
+
+
 # Transitions where output length is NOT prev_len + cur_len (concat/insert/loop):
 # accent overlay offset based on cur length is unreliable, skip.
 _ACCENT_INCOMPATIBLE = frozenset({
@@ -181,6 +305,33 @@ _ACCENT_INCOMPATIBLE = frozenset({
 })
 
 
+# Categories that must remain grid-locked. Risers/sweeps need to RESOLVE on
+# the phrase 1 of the incoming drop; jittering the start would mistime the
+# climax. Other categories (impacts/snare_rolls/hihat_rolls) take micro-jitter
+# happily — that's where the human "pocket" lives.
+_LOCKED_ACCENT_CATEGORIES = frozenset({'risers', 'sweeps'})
+
+# Humanization tuning. Tightened for techno/house feel; widen for hip-hop
+# in Phase 2.
+_JITTER_MS = 8.0
+_VELOCITY_RANGE = (0.92, 1.08)
+
+
+def _humanize_accent(category: str, anchor_seed) -> tuple[float, float]:
+    """Return (timing_jitter_ms, velocity_scalar) for an accent overlay.
+
+    Locked categories return (0.0, 1.0). All others jitter deterministically
+    via a per-junction seed so re-renders are reproducible.
+    """
+    if category in _LOCKED_ACCENT_CATEGORIES:
+        return 0.0, 1.0
+    import random
+    rng = random.Random(anchor_seed)
+    jitter_ms = rng.uniform(-_JITTER_MS, _JITTER_MS)
+    velocity = rng.uniform(*_VELOCITY_RANGE)
+    return jitter_ms, velocity
+
+
 def _overlay_accent_hint(out: np.ndarray, cur: dict, sample_bank: SampleBank,
                          target_bpm: float, beat_dur: float) -> np.ndarray:
     ah = cur['entry'].get('accent_hint')
@@ -189,14 +340,23 @@ def _overlay_accent_hint(out: np.ndarray, cur: dict, sample_bank: SampleBank,
     tech_name = cur['entry'].get('transition_in', {}).get('name', 'crossfade')
     if tech_name in _ACCENT_INCOMPATIBLE:
         return out
-    cat = ah.get('fx_category', 'hihat_rolls')
+    cat = str(ah.get('fx_category', 'hihat_rolls'))
+    if not sample_bank.has(cat):
+        # gated by allowed_types — silently skip
+        return out
     beats = float(ah.get('beats', 2.0))
     try:
-        sample = sample_bank.get_fx(str(cat), target_bpm, beats=beats)
+        sample = sample_bank.get_fx(cat, target_bpm, beats=beats)
     except Exception:
         return out
-    at = max(0, out.shape[1] - cur['full'].shape[1] - int(beats * beat_dur * SR))
-    return T.overlay_sample(out, sample, at, gain=0.35)
+    base_at = max(0, out.shape[1] - cur['full'].shape[1] - int(beats * beat_dur * SR))
+    seed = (cur['entry'].get('clip_id', '?'),
+            cur['entry'].get('junction_index', 0),
+            cat)
+    jitter_ms, velocity = _humanize_accent(cat, seed)
+    jitter_samples = int(jitter_ms * SR / 1000.0)
+    at = max(0, base_at + jitter_samples)
+    return T.overlay_sample(out, sample, at, gain=0.35 * velocity)
 
 
 def apply_transition(output: np.ndarray, prev: dict, cur: dict,
@@ -307,11 +467,9 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
         tighten_n = int(sb * 4 * beat_dur * SR * 2)
         riser_at = max(0, out.shape[1] - cur['full'].shape[1] - tighten_n)
         out = T.overlay_sample(out, riser, riser_at, gain=0.4)
-        # Airhorn at the drop, if it's a high-energy incoming
-        if cur['entry']['segment'].get('energy', 0.5) > 0.85:
-            horn = sample_bank.get_fx('airhorns', target_bpm, beats=1.0)
-            horn_at = out.shape[1] - cur['full'].shape[1]
-            out = T.overlay_sample(out, horn, horn_at, gain=0.3)
+        # Airhorn drop-in disabled in Phase A polish — pollutes mix on
+        # well-mastered tracks. SampleBank will return silence for 'airhorns'
+        # under PHASE1_ALLOWED_TYPES anyway; this avoids the overlay call entirely.
         return _done(out)
     if name == 'scratch_fill':
         hook_seg = prev['full'][:, -int(2 * beat_dur * SR):]
@@ -347,6 +505,16 @@ def execute(timeline_path: str, cache_dir: str, out_path: str,
             continue
         with open(Path(cache_dir) / f'{cid}.json') as f:
             clips_meta[cid] = json.load(f)
+
+    # Phrase-quantize segment boundaries so junctions land on real phrase 1.
+    # Disable with AIJOCKEY_PHRASE_QUANTIZE=0 if A/B testing.
+    import os
+    if os.getenv('AIJOCKEY_PHRASE_QUANTIZE', '1') != '0':
+        before = [(e['segment'].get('start'), e['segment'].get('end')) for e in tl]
+        quantize_timeline_to_phrase(tl, clips_meta, max_drift_bars=2)
+        moved = sum(1 for (a, e) in zip(before, tl)
+                    if a != (e['segment'].get('start'), e['segment'].get('end')))
+        print(f"phrase-quantize: snapped {moved}/{len(tl)} segment boundaries")
 
     sample_bank = SampleBank(samples_dir)
     print(f"sample bank: real types={list(sample_bank.bank.keys())}, "
