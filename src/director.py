@@ -128,10 +128,40 @@ WORKFLOW (think this way before emitting JSON):
   3. Pick arc + tiers + accents that SERVE the narrative.
   4. Annotate each junction with INTENT: why are you using this transition here?
 
-TRANSITION TIERS (Phase 1 — no cut, no loop):
-- "minor": smooth EQ swap / crossfade over 8-16 bars. Workhorse, low drama.
-- "major": structurally significant — filter_fade, drum_break, or echo_out. Use to mark NEW SECTION of the set narrative.
-- "drop":  build_riser_drop. Engineer a climax. ONLY when both sides are drop-compatible (drop/hook/peak). NEVER over breakdown/intro/outro — that's an energy crater. If your pool has no drop-section clips, pick zero drop tiers.
+TRANSITION TIERS (Phase 1 — no cut, no loop, full vocabulary available):
+- "minor": smooth handoff. Vocab: crossfade, eq_swap, bass_swap, highs_swap,
+           short_crossfade, long_crossfade, instrumental_swap. Workhorse.
+- "major": structurally significant. Vocab: filter_fade, highpass_sweep_in,
+           drum_break, kickless_swap, drum_replace, stem_swap, mashup,
+           echo_out, reverb_wash, pitch_bend, spectral_hold, bpm_warp,
+           harmonic_overlay. Use to mark NEW SECTION of the set narrative.
+- "drop":  engineer a climax. Vocab: silence_drop, build_riser_drop (when
+           pool has drop-compatible material), acapella_drop. ONLY when
+           both sides are drop-compatible (drop/hook/peak/chorus). NEVER
+           over breakdown/intro/outro — that's an energy crater. If pool
+           has no drop-section clips, pick zero drop tiers.
+
+VOCAL-SAFETY RULE (ENFORCED at execute layer):
+   When EITHER junction side has vocal_activity > 0.30, AGGRESSIVE
+   techniques are auto-rejected and downgraded to crossfade. Aggressive
+   set: chop, tape_stop, drum_replace, kickless_swap, spinback,
+   forward_spin, build_riser_drop, snare_buildup, scratch_fill,
+   loop_tighten, loop_roll, beat_juggle, pitch_bend, bpm_warp,
+   spectral_hold. These shred vocals — use them only on instrumental
+   sections (label='inst' / 'break' / 'bridge' / 'solo').
+
+   You ARE allowed to suggest aggressive techniques on instrumental
+   sections — the pool has plenty of instrumental material, lean into it
+   when the section vocab supports it. Don't be conservative when the
+   material says go big.
+
+VOCAL-FRIENDLY TECHNIQUES (safe even on chorus / verse / vocals-active):
+   crossfade, short_crossfade, long_crossfade, eq_swap, bass_swap,
+   highs_swap, frequency_blend, filter_fade, highpass_sweep_in,
+   band_filter_sweep, stem_swap, mashup, instrumental_swap, echo_out,
+   reverb_wash, harmonic_overlay, riser_overlay, impact_overlay.
+
+   These can run over vocal-active sections without warping the vocal.
 
 JUNCTION INTENT (tag each junction with WHY):
 - "breath"          : low-energy bridge between dense moments

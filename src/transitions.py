@@ -412,3 +412,490 @@ def overlay_sample(host: np.ndarray, sample: np.ndarray, at_sample_idx: int,
     out = host.astype(np.float32).copy()
     out[:, at_sample_idx:end] += seg
     return np.clip(out, -1.0, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Extended catalog (catalog.json status='implemented' upgrades).
+# All accept stereo (2, T), return full stitched audio, same SR convention.
+# ---------------------------------------------------------------------------
+
+
+def _split_lo_hi(x: np.ndarray, sr: int, cutoff: float) -> tuple[np.ndarray, np.ndarray]:
+    """Two-band split. Returns (low, high) such that low + high ≈ x."""
+    lo = lp_filter(x, sr, cutoff)
+    hi = hp_filter(x, sr, cutoff)
+    return lo, hi
+
+
+def bass_swap_transition(out_full: np.ndarray, in_full: np.ndarray,
+                          sr: int, bars: int, beat_dur: float,
+                          cutoff: float = 200.0) -> np.ndarray:
+    """EQ Mixing — only the BASS swaps. Highs keep flowing from outgoing
+    throughout the overlap. Avoids low-end mud without changing top-end.
+    """
+    n = int(bars * 4 * beat_dur * sr)
+    overlap_n = min(n, out_full.shape[1], in_full.shape[1])
+    if overlap_n <= 0:
+        return cut_transition(out_full, in_full)
+    out_tail = out_full[:, -overlap_n:]
+    in_head = in_full[:, :overlap_n]
+    out_lo, out_hi = _split_lo_hi(out_tail, sr, cutoff)
+    in_lo, _ = _split_lo_hi(in_head, sr, cutoff)
+    t = np.linspace(0.0, 1.0, overlap_n, dtype=np.float32)
+    bass = out_lo * (1.0 - t) + in_lo * t
+    overlap = bass + out_hi
+    body = out_full[:, :-overlap_n] if out_full.shape[1] > overlap_n else np.zeros((2, 0), dtype=np.float32)
+    rest = in_full[:, overlap_n:] if in_full.shape[1] > overlap_n else np.zeros((2, 0), dtype=np.float32)
+    return np.concatenate([body, overlap.astype(np.float32), rest], axis=1)
+
+
+def highs_swap_transition(out_full: np.ndarray, in_full: np.ndarray,
+                           sr: int, bars: int, beat_dur: float,
+                           cutoff: float = 4000.0) -> np.ndarray:
+    """Top-end (cymbals/hihats) swap; lows + mids continue from outgoing."""
+    n = int(bars * 4 * beat_dur * sr)
+    overlap_n = min(n, out_full.shape[1], in_full.shape[1])
+    if overlap_n <= 0:
+        return cut_transition(out_full, in_full)
+    out_tail = out_full[:, -overlap_n:]
+    in_head = in_full[:, :overlap_n]
+    out_lo, out_hi = _split_lo_hi(out_tail, sr, cutoff)
+    _, in_hi = _split_lo_hi(in_head, sr, cutoff)
+    t = np.linspace(0.0, 1.0, overlap_n, dtype=np.float32)
+    highs = out_hi * (1.0 - t) + in_hi * t
+    overlap = highs + out_lo
+    body = out_full[:, :-overlap_n] if out_full.shape[1] > overlap_n else np.zeros((2, 0), dtype=np.float32)
+    rest = in_full[:, overlap_n:] if in_full.shape[1] > overlap_n else np.zeros((2, 0), dtype=np.float32)
+    return np.concatenate([body, overlap.astype(np.float32), rest], axis=1)
+
+
+def highpass_sweep_in_transition(out_full: np.ndarray, in_full: np.ndarray,
+                                  sr: int, bars: int, beat_dur: float,
+                                  min_cutoff: float = 400.0,
+                                  max_cutoff: float = 20.0) -> np.ndarray:
+    """Mirror of filter_fade. Incoming enters HIGHPASSED (top-end only) and
+    sweeps DOWN to full spectrum. Builds anticipation into a drop / chorus.
+    """
+    n = int(bars * 4 * beat_dur * sr)
+    overlap_n = min(n, out_full.shape[1], in_full.shape[1])
+    if overlap_n <= 0:
+        return cut_transition(out_full, in_full)
+    in_head = in_full[:, :overlap_n]
+    chunk = max(1, int(beat_dur * sr / 2))     # 1/8-note chunks
+    pieces = []
+    n_chunks = max(1, overlap_n // chunk)
+    for i in range(n_chunks):
+        # cutoff sweeps from min_cutoff (heavy hp) toward max_cutoff (open)
+        # max_cutoff < min_cutoff numerically, so interpolate inverted
+        frac = i / max(1, n_chunks - 1)
+        cutoff = min_cutoff * (1.0 - frac) + max_cutoff * frac
+        cutoff = max(20.0, min(sr * 0.45, cutoff))
+        seg = in_head[:, i * chunk:(i + 1) * chunk]
+        if seg.shape[1] == 0:
+            continue
+        if cutoff > 50.0:
+            seg = hp_filter(seg, sr, cutoff)
+        pieces.append(seg)
+    if not pieces:
+        return cut_transition(out_full, in_full)
+    swept = np.concatenate(pieces, axis=1)[:, :overlap_n]
+    if swept.shape[1] < overlap_n:
+        swept = np.pad(swept, ((0, 0), (0, overlap_n - swept.shape[1])))
+    out_tail = out_full[:, -overlap_n:]
+    t = np.linspace(0.0, np.pi / 2.0, overlap_n, dtype=np.float32)
+    fade_out = np.cos(t)
+    fade_in = np.sin(t)
+    overlap = out_tail * fade_out + swept * fade_in
+    body = out_full[:, :-overlap_n] if out_full.shape[1] > overlap_n else np.zeros((2, 0), dtype=np.float32)
+    rest = in_full[:, overlap_n:] if in_full.shape[1] > overlap_n else np.zeros((2, 0), dtype=np.float32)
+    return np.concatenate([body, overlap.astype(np.float32), rest], axis=1)
+
+
+def punch_in_transition(out_full: np.ndarray, in_full: np.ndarray,
+                         sr: int = SR, anti_click_ms: float = 5.0) -> np.ndarray:
+    """Hard cut on the 1 with anti-click ramps (~5 ms each side). Like cut
+    but eliminates the discontinuity-pop at non-zero-crossing splices.
+    """
+    n_click = max(1, int(anti_click_ms * sr / 1000.0))
+    n_click = min(n_click, out_full.shape[1], in_full.shape[1])
+    if n_click < 4:
+        return cut_transition(out_full, in_full)
+    out_tail = out_full[:, -n_click:].astype(np.float32) * np.linspace(1.0, 0.0, n_click, dtype=np.float32)
+    in_head = in_full[:, :n_click].astype(np.float32) * np.linspace(0.0, 1.0, n_click, dtype=np.float32)
+    body = out_full[:, :-n_click]
+    rest = in_full[:, n_click:]
+    junction = out_tail + in_head
+    return np.concatenate([body, junction, rest], axis=1)
+
+
+def chop_transition(out_full: np.ndarray, in_full: np.ndarray,
+                     sr: int, beat_dur: float,
+                     n_chops: int = 4, period_beats: float = 0.5) -> np.ndarray:
+    """Rapid alternation between outgoing and incoming. Each chop is
+    `period_beats` long. Total chop region = n_chops * period_beats. After
+    the last chop, incoming continues full. Limit to 1-2 per set.
+    """
+    period = max(1, int(period_beats * beat_dur * sr))
+    chop_total = period * n_chops
+    if chop_total >= out_full.shape[1] or chop_total >= in_full.shape[1]:
+        return cut_transition(out_full, in_full)
+    body = out_full[:, :-chop_total]
+    pieces = []
+    for i in range(n_chops):
+        if i % 2 == 0:
+            # Pull from outgoing (advancing within its tail)
+            src_start = out_full.shape[1] - chop_total + i * period
+            chop = out_full[:, src_start:src_start + period]
+        else:
+            # Pull from incoming
+            in_idx = (i // 2) * period * 2 + period   # interleave
+            chop = in_full[:, in_idx:in_idx + period] if in_idx < in_full.shape[1] else None
+        if chop is None or chop.shape[1] == 0:
+            continue
+        # 1ms ramps on each chop edge to avoid clicks
+        ramp = max(1, int(0.001 * sr))
+        if chop.shape[1] > 2 * ramp:
+            chop = chop.astype(np.float32, copy=True)
+            chop[:, :ramp] *= np.linspace(0.0, 1.0, ramp, dtype=np.float32)
+            chop[:, -ramp:] *= np.linspace(1.0, 0.0, ramp, dtype=np.float32)
+        pieces.append(chop)
+    if not pieces:
+        return cut_transition(out_full, in_full)
+    chop_region = np.concatenate(pieces, axis=1)
+    rest = in_full[:, chop_total:]
+    return np.concatenate([body, chop_region.astype(np.float32), rest], axis=1)
+
+
+def loop_roll_transition(out_full: np.ndarray, in_full: np.ndarray,
+                          sr: int, beat_dur: float,
+                          steps: int = 4) -> np.ndarray:
+    """Progressive halving: 1/2 beat → 1/4 → 1/8 → 1/16 over outgoing's
+    tail, then hard handoff to incoming. More aggressive than loop_tighten.
+    """
+    durations_beats = [0.5 / (2 ** i) for i in range(steps)]
+    durations_samples = [max(1, int(d * beat_dur * sr)) for d in durations_beats]
+    total = sum(durations_samples)
+    if total >= out_full.shape[1]:
+        return cut_transition(out_full, in_full)
+    body = out_full[:, :-total]
+    seed = out_full[:, -durations_samples[0]:].astype(np.float32)
+    pieces = []
+    for d in durations_samples:
+        # Take the LAST d samples of seed and ramp them
+        loop = seed[:, -d:].astype(np.float32, copy=True)
+        ramp = max(1, int(0.001 * sr))
+        if loop.shape[1] > 2 * ramp:
+            loop[:, :ramp] *= np.linspace(0.0, 1.0, ramp, dtype=np.float32)
+            loop[:, -ramp:] *= np.linspace(1.0, 0.0, ramp, dtype=np.float32)
+        pieces.append(loop)
+    rolled = np.concatenate(pieces, axis=1)
+    return np.concatenate([body, rolled.astype(np.float32),
+                            in_full.astype(np.float32)], axis=1)
+
+
+def beat_juggle_transition(out_full: np.ndarray, in_full: np.ndarray,
+                            sr: int, beat_dur: float,
+                            n_juggles: int = 2,
+                            period_beats: float = 1.0) -> np.ndarray:
+    """Alternate `period_beats`-long loops between outgoing and incoming
+    `n_juggles` times. Each side plays its own slice in turn. Then full
+    handoff to incoming.
+    """
+    period = max(1, int(period_beats * beat_dur * sr))
+    juggle_total = period * n_juggles * 2
+    if juggle_total >= out_full.shape[1] or juggle_total >= in_full.shape[1]:
+        return cut_transition(out_full, in_full)
+    body = out_full[:, :-period]
+    pieces = []
+    for i in range(n_juggles * 2):
+        if i % 2 == 0:
+            chop = out_full[:, -period:]
+        else:
+            chop = in_full[:, :period]
+        ramp = max(1, int(0.001 * sr))
+        c = chop.astype(np.float32, copy=True)
+        if c.shape[1] > 2 * ramp:
+            c[:, :ramp] *= np.linspace(0.0, 1.0, ramp, dtype=np.float32)
+            c[:, -ramp:] *= np.linspace(1.0, 0.0, ramp, dtype=np.float32)
+        pieces.append(c)
+    return np.concatenate([body] + pieces + [in_full.astype(np.float32)], axis=1)
+
+
+def acapella_drop_transition(out_full: np.ndarray, out_vox: np.ndarray,
+                              in_full: np.ndarray, sr: int,
+                              vocal_only_bars: int = 4,
+                              beat_dur: float = 0.5) -> np.ndarray:
+    """Strip outgoing to vocals only over N bars, then incoming drops on
+    the 1. `out_vox` is the pre-computed vocal stem of outgoing.
+    """
+    vocal_n = int(vocal_only_bars * 4 * beat_dur * sr)
+    vocal_n = min(vocal_n, out_full.shape[1], out_vox.shape[1])
+    if vocal_n <= 0:
+        return cut_transition(out_full, in_full)
+    body = out_full[:, :-vocal_n] if out_full.shape[1] > vocal_n else np.zeros((2, 0), dtype=np.float32)
+    vox_only = out_vox[:, -vocal_n:].astype(np.float32)
+    return np.concatenate([body, vox_only, in_full.astype(np.float32)], axis=1)
+
+
+def instrumental_swap_transition(out_full: np.ndarray, out_vox: np.ndarray,
+                                  in_inst: np.ndarray, sr: int, bars: int,
+                                  beat_dur: float) -> np.ndarray:
+    """Mirror of mashup. Outgoing's vocals continue while incoming's
+    instrumental backing replaces outgoing's. Vocals on top of new bed.
+    """
+    n_overlay = int(bars * 4 * beat_dur * sr)
+    n_overlay = min(n_overlay, out_vox.shape[1], in_inst.shape[1])
+    if n_overlay <= 0 or out_full.shape[1] < n_overlay:
+        return cut_transition(out_full, in_full=in_inst)
+    body = out_full[:, :-n_overlay] if out_full.shape[1] > n_overlay else np.zeros((2, 0), dtype=np.float32)
+    vox_tail = out_vox[:, -n_overlay:].astype(np.float32)
+    inst_head = in_inst[:, :n_overlay].astype(np.float32)
+    overlay = vox_tail + inst_head
+    rest_inst = in_inst[:, n_overlay:] if in_inst.shape[1] > n_overlay else np.zeros((2, 0), dtype=np.float32)
+    return np.concatenate([body, np.clip(overlay, -1.0, 1.0), rest_inst.astype(np.float32)], axis=1)
+
+
+def kickless_swap_transition(out_full: np.ndarray, out_drums: np.ndarray,
+                              in_full: np.ndarray, in_drums: np.ndarray,
+                              sr: int, bars: int, beat_dur: float) -> np.ndarray:
+    """Remove kick (low-band of drums) on both during overlap. Re-add full
+    drums on incoming downbeat. Avoids competing kick patterns.
+    """
+    n = int(bars * 4 * beat_dur * sr)
+    overlap_n = min(n, out_full.shape[1], in_full.shape[1])
+    if overlap_n <= 0 or out_drums.shape[1] < overlap_n or in_drums.shape[1] < overlap_n:
+        return crossfade_transition(out_full, in_full, sr, bars, beat_dur)
+    out_tail = out_full[:, -overlap_n:].astype(np.float32)
+    in_head = in_full[:, :overlap_n].astype(np.float32)
+    # Remove kick band (sub-130 Hz) from drum stems → subtract from full mix
+    out_kick = lp_filter(out_drums[:, -overlap_n:], sr, 130.0)
+    in_kick = lp_filter(in_drums[:, :overlap_n], sr, 130.0)
+    out_no_kick = out_tail - out_kick
+    in_no_kick = in_head - in_kick
+    t = np.linspace(0.0, np.pi / 2.0, overlap_n, dtype=np.float32)
+    fade_out = np.cos(t)
+    fade_in = np.sin(t)
+    overlap = out_no_kick * fade_out + in_no_kick * fade_in
+    body = out_full[:, :-overlap_n] if out_full.shape[1] > overlap_n else np.zeros((2, 0), dtype=np.float32)
+    rest = in_full[:, overlap_n:] if in_full.shape[1] > overlap_n else np.zeros((2, 0), dtype=np.float32)
+    return np.concatenate([body, overlap.astype(np.float32), rest], axis=1)
+
+
+def drum_replace_transition(out_full: np.ndarray, out_drums: np.ndarray,
+                             in_full: np.ndarray, in_drums: np.ndarray,
+                             sr: int, bars: int, beat_dur: float) -> np.ndarray:
+    """Swap drum stem from outgoing to incoming early; non-drum stems of
+    outgoing continue, then full handoff to incoming. Tempo-match assumed.
+    """
+    n = int(bars * 4 * beat_dur * sr)
+    overlap_n = min(n, out_full.shape[1], in_full.shape[1])
+    if overlap_n <= 0 or out_drums.shape[1] < overlap_n or in_drums.shape[1] < overlap_n:
+        return crossfade_transition(out_full, in_full, sr, bars, beat_dur)
+    # Outgoing minus its own drums = "inst-no-drums" backing
+    out_tail = out_full[:, -overlap_n:].astype(np.float32)
+    out_drums_tail = out_drums[:, -overlap_n:].astype(np.float32)
+    in_drums_head = in_drums[:, :overlap_n].astype(np.float32)
+    backing = out_tail - out_drums_tail
+    # Half overlap: backing + incoming drums; second half: full incoming
+    half = overlap_n // 2
+    if half <= 0:
+        return cut_transition(out_full, in_full)
+    swap_region = np.concatenate([
+        backing[:, :half] + in_drums_head[:, :half],
+        in_full[:, half:overlap_n].astype(np.float32),
+    ], axis=1)
+    body = out_full[:, :-overlap_n] if out_full.shape[1] > overlap_n else np.zeros((2, 0), dtype=np.float32)
+    rest = in_full[:, overlap_n:] if in_full.shape[1] > overlap_n else np.zeros((2, 0), dtype=np.float32)
+    return np.concatenate([body, np.clip(swap_region, -1.0, 1.0), rest], axis=1)
+
+
+def reverb_wash_transition(out_full: np.ndarray, in_full: np.ndarray,
+                            sr: int, bars: int, beat_dur: float,
+                            decay_sec: float = 2.5,
+                            wet_gain: float = 0.6) -> np.ndarray:
+    """Outgoing tail soaked in long reverb (synthetic exp-decay convolution)
+    as a bridge. Atmospheric / cinematic.
+    """
+    n = int(bars * 4 * beat_dur * sr)
+    overlap_n = min(n, out_full.shape[1], in_full.shape[1])
+    if overlap_n <= 0:
+        return cut_transition(out_full, in_full)
+    # Build a quick exponential-decay impulse response (synthetic reverb)
+    ir_n = max(1, int(decay_sec * sr))
+    rng = np.random.default_rng(42)
+    ir_mono = rng.standard_normal(ir_n).astype(np.float32)
+    ir_mono *= np.exp(-np.linspace(0, 6, ir_n, dtype=np.float32))
+    ir_mono /= max(1e-6, np.linalg.norm(ir_mono))
+    out_tail = out_full[:, -overlap_n:].astype(np.float32)
+    # Convolve each channel
+    wet = np.stack([
+        np.convolve(out_tail[c], ir_mono, mode='same') for c in range(out_tail.shape[0])
+    ]).astype(np.float32)
+    t = np.linspace(0.0, np.pi / 2.0, overlap_n, dtype=np.float32)
+    fade_out = np.cos(t)
+    fade_in = np.sin(t)
+    overlap = (out_tail * fade_out
+                + wet * (wet_gain * fade_out)
+                + in_full[:, :overlap_n].astype(np.float32) * fade_in)
+    body = out_full[:, :-overlap_n] if out_full.shape[1] > overlap_n else np.zeros((2, 0), dtype=np.float32)
+    rest = in_full[:, overlap_n:] if in_full.shape[1] > overlap_n else np.zeros((2, 0), dtype=np.float32)
+    return np.concatenate([body, np.clip(overlap, -1.0, 1.0), rest], axis=1)
+
+
+def forward_spin_transition(out_full: np.ndarray, in_full: np.ndarray,
+                             sr: int, beat_dur: float,
+                             accel_beats: float = 1.0,
+                             max_pitch_ratio: float = 1.6) -> np.ndarray:
+    """Pitch-up acceleration of outgoing into incoming hard cut. Mirror of
+    spinback. Plays last `accel_beats` at progressively higher pitch.
+    """
+    n = max(1, int(accel_beats * beat_dur * sr))
+    n = min(n, out_full.shape[1])
+    body = out_full[:, :-n] if out_full.shape[1] > n else np.zeros((2, 0), dtype=np.float32)
+    src = out_full[:, -n:].astype(np.float32)
+    out_n = max(1, int(n / max_pitch_ratio))
+    idx = np.linspace(0, n - 1, out_n).astype(np.int64)
+    spun = src[:, idx]
+    # Quick fade-out to avoid click into incoming
+    ramp_n = max(1, int(0.005 * sr))
+    if spun.shape[1] > ramp_n:
+        spun[:, -ramp_n:] *= np.linspace(1.0, 0.0, ramp_n, dtype=np.float32)
+    return np.concatenate([body, spun, in_full.astype(np.float32)], axis=1)
+
+
+def tape_stop_transition(out_full: np.ndarray, in_full: np.ndarray,
+                          sr: int, beat_dur: float,
+                          slow_beats: float = 1.0,
+                          curve: str = 'exp') -> np.ndarray:
+    """Vari-speed slowdown that drops pitch + tempo to zero over `slow_beats`.
+    More extreme than spinback. `curve`='exp' for exponential decay,
+    'linear' for constant deceleration.
+    """
+    n = max(1, int(slow_beats * beat_dur * sr))
+    n = min(n, out_full.shape[1])
+    body = out_full[:, :-n] if out_full.shape[1] > n else np.zeros((2, 0), dtype=np.float32)
+    src = out_full[:, -n:].astype(np.float32)
+    if curve == 'exp':
+        # Exponentially decreasing rate
+        rate = np.exp(np.linspace(0.0, -3.0, n, dtype=np.float32))
+    else:
+        rate = np.linspace(1.0, 0.05, n, dtype=np.float32)
+    pos = np.cumsum(rate)
+    pos = pos / pos[-1] * (n - 1)
+    idx = pos.astype(np.int64)
+    stopped = src[:, idx]
+    # Fade tail down to silence to seal the slowdown
+    fade = np.linspace(1.0, 0.0, n, dtype=np.float32)
+    stopped = stopped * fade
+    return np.concatenate([body, stopped, in_full.astype(np.float32)], axis=1)
+
+
+def spectral_hold_transition(out_full: np.ndarray, in_full: np.ndarray,
+                              sr: int, bars: int, beat_dur: float,
+                              hold_bars: int = 2) -> np.ndarray:
+    """Freeze harmonic content of outgoing's last bar (FFT magnitude held
+    over `hold_bars`) while drums change underneath. Glue layer for
+    cross-genre jumps. Cheap rule-based phase-cancel mitigation.
+    """
+    bar_n = int(4 * beat_dur * sr)
+    hold_n = min(hold_bars * bar_n, out_full.shape[1] // 2)
+    if hold_n <= 0:
+        return cut_transition(out_full, in_full)
+    # Take last bar of outgoing as the spectral seed
+    seed_n = min(bar_n, out_full.shape[1])
+    seed = out_full[:, -seed_n:].astype(np.float32)
+    # Build held audio by repeating the seed `hold_bars` times with random
+    # phase to avoid perfect periodicity (which would sound mechanical).
+    rng = np.random.default_rng(0)
+    pieces = []
+    for _ in range(max(1, hold_n // seed_n)):
+        # Apply a small random phase shift via tiny random rotation in time
+        shift = rng.integers(0, max(1, seed_n // 32))
+        rolled = np.roll(seed, int(shift), axis=1)
+        pieces.append(rolled.astype(np.float32))
+    held = np.concatenate(pieces, axis=1)[:, :hold_n]
+    # Crossfade out the hold and crossfade in the incoming
+    overlap_n = min(hold_n, in_full.shape[1])
+    body = out_full[:, :-seed_n] if out_full.shape[1] > seed_n else np.zeros((2, 0), dtype=np.float32)
+    t = np.linspace(0.0, np.pi / 2.0, overlap_n, dtype=np.float32)
+    fade_out = np.cos(t)
+    fade_in = np.sin(t)
+    bridge = held[:, :overlap_n] * fade_out + in_full[:, :overlap_n].astype(np.float32) * fade_in
+    rest = in_full[:, overlap_n:] if in_full.shape[1] > overlap_n else np.zeros((2, 0), dtype=np.float32)
+    return np.concatenate([body, bridge.astype(np.float32), rest], axis=1)
+
+
+def bpm_warp_transition(out_full: np.ndarray, in_full: np.ndarray,
+                         sr: int, bars: int, beat_dur: float,
+                         out_bpm: float, in_bpm: float) -> np.ndarray:
+    """Gradual BPM blend over `bars` for cross-tempo bridging. Uses simple
+    resample (rate-warp) rather than pyrubberband (cheap, slight pitch
+    coupling — acceptable for short bridges). Outgoing slows / incoming
+    speeds toward midpoint, then incoming continues at its own rate.
+    """
+    if out_bpm <= 0 or in_bpm <= 0 or abs(out_bpm - in_bpm) < 1.0:
+        return crossfade_transition(out_full, in_full, sr, bars, beat_dur)
+    overlap_n = min(int(bars * 4 * beat_dur * sr),
+                     out_full.shape[1], in_full.shape[1])
+    if overlap_n <= 0:
+        return cut_transition(out_full, in_full)
+    midpoint = (out_bpm + in_bpm) / 2.0
+    # Outgoing speed ramp 1.0 → midpoint/out_bpm
+    out_target_ratio = midpoint / out_bpm
+    in_source_ratio = midpoint / in_bpm
+    out_tail = out_full[:, -overlap_n:].astype(np.float32)
+    in_head = in_full[:, :overlap_n].astype(np.float32)
+    # Resample by linear interp with a varying rate
+    out_rates = np.linspace(1.0, out_target_ratio, overlap_n, dtype=np.float32)
+    out_pos = np.cumsum(out_rates)
+    out_pos *= (overlap_n - 1) / out_pos[-1]
+    out_idx = np.clip(out_pos.astype(np.int64), 0, overlap_n - 1)
+    out_warped = out_tail[:, out_idx]
+    in_rates = np.linspace(in_source_ratio, 1.0, overlap_n, dtype=np.float32)
+    in_pos = np.cumsum(in_rates)
+    in_pos *= (overlap_n - 1) / in_pos[-1]
+    in_idx = np.clip(in_pos.astype(np.int64), 0, overlap_n - 1)
+    in_warped = in_head[:, in_idx]
+    t = np.linspace(0.0, np.pi / 2.0, overlap_n, dtype=np.float32)
+    fade_out = np.cos(t)
+    fade_in = np.sin(t)
+    overlap = out_warped * fade_out + in_warped * fade_in
+    body = out_full[:, :-overlap_n] if out_full.shape[1] > overlap_n else np.zeros((2, 0), dtype=np.float32)
+    rest = in_full[:, overlap_n:] if in_full.shape[1] > overlap_n else np.zeros((2, 0), dtype=np.float32)
+    return np.concatenate([body, overlap.astype(np.float32), rest], axis=1)
+
+
+def harmonic_overlay_transition(out_full: np.ndarray, in_full: np.ndarray,
+                                 sr: int, bars: int, beat_dur: float,
+                                 pad_freqs: tuple[float, ...] = (220.0, 277.0, 330.0),
+                                 pad_gain: float = 0.15) -> np.ndarray:
+    """Sustained pad layer on bridge between tracks. Synthesizes a major
+    chord drone (defaults A3-C#4-E4) over the overlap; both tracks
+    crossfade underneath. Glue for genre-jump or key-jump junctions.
+    """
+    overlap_n = min(int(bars * 4 * beat_dur * sr),
+                     out_full.shape[1], in_full.shape[1])
+    if overlap_n <= 0:
+        return cut_transition(out_full, in_full)
+    t_axis = np.arange(overlap_n, dtype=np.float32) / sr
+    pad_mono = np.zeros(overlap_n, dtype=np.float32)
+    for f in pad_freqs:
+        pad_mono += np.sin(2 * np.pi * f * t_axis)
+    pad_mono /= max(1, len(pad_freqs))
+    # Long attack/release envelope so the pad doesn't pop in
+    env = np.ones(overlap_n, dtype=np.float32)
+    attack_n = min(overlap_n // 4, int(beat_dur * sr * 2))
+    if attack_n > 0:
+        env[:attack_n] = np.linspace(0.0, 1.0, attack_n, dtype=np.float32)
+        env[-attack_n:] = np.linspace(1.0, 0.0, attack_n, dtype=np.float32)
+    pad_mono = pad_mono * env * pad_gain
+    pad = np.stack([pad_mono, pad_mono])
+    out_tail = out_full[:, -overlap_n:].astype(np.float32)
+    in_head = in_full[:, :overlap_n].astype(np.float32)
+    t = np.linspace(0.0, np.pi / 2.0, overlap_n, dtype=np.float32)
+    fade_out = np.cos(t)
+    fade_in = np.sin(t)
+    overlap = out_tail * fade_out + in_head * fade_in + pad
+    body = out_full[:, :-overlap_n] if out_full.shape[1] > overlap_n else np.zeros((2, 0), dtype=np.float32)
+    rest = in_full[:, overlap_n:] if in_full.shape[1] > overlap_n else np.zeros((2, 0), dtype=np.float32)
+    return np.concatenate([body, np.clip(overlap, -1.0, 1.0), rest], axis=1)
