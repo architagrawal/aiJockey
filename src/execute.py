@@ -215,16 +215,30 @@ def _rubberband_combined(x: np.ndarray, sr: int, rate: float,
 
 def stretch_and_pitch(wav: np.ndarray, sr: int, src_bpm: float,
                       dst_bpm: float, semitones: float,
-                      max_bpm_ratio: float | None = None) -> np.ndarray:
-    """rubberband expects (T, channels). wav is (channels, T)."""
+                      max_bpm_ratio: float | None = None,
+                      vocal_safe: bool = True) -> np.ndarray:
+    """rubberband expects (T, channels). wav is (channels, T).
+
+    vocal_safe (default True): hard-cap stretch ratio to [0.92, 1.09] —
+    DJ industry 8% rule. Beyond that = audible vocal warp. When cap fires
+    the effective dst BPM moves toward src; residual beat-grid drift
+    handled by DTW alignment in overlap region. Set vocal_safe=False for
+    legacy unlimited stretch (env AIJOCKEY_VOCAL_SAFE_STRETCH=0).
+    """
     x = wav.T.astype(np.float32)
-    # Tempo octave normalization: beat trackers (BT, madmom) sometimes
-    # detect half/double tempo (trap 130 → 65). Without this, rubberband
-    # stretches at 2x ratio → pitch warp + phrase-grid misalign. 1-line
-    # canonicalization to the [90, 180] band before stretch.
+    # Tempo octave normalization: beat trackers sometimes detect half/double
+    # tempo (trap 130 → 65). Canonicalize to [90, 180] before stretch.
     from tempo_octave import normalize_tempo
     src_bpm = normalize_tempo(float(src_bpm))
     dst = float(dst_bpm)
+    # Vocal-safe stretch cap — overrides max_bpm_ratio when stricter.
+    # 0.92/1.09 = ±8% (DJ rule). Default ON.
+    if vocal_safe and os.environ.get('AIJOCKEY_VOCAL_SAFE_STRETCH', '1') != '0' and src_bpm > 0:
+        ratio = dst / src_bpm
+        if ratio < 0.92:
+            dst = src_bpm * 0.92
+        elif ratio > 1.09:
+            dst = src_bpm * 1.09
     if src_bpm > 0 and max_bpm_ratio and max_bpm_ratio > 1.0:
         lo = src_bpm / max_bpm_ratio
         hi = src_bpm * max_bpm_ratio
@@ -556,13 +570,30 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
     bars = max(1, overlap_n // bar_samples)
     if int(tech.get('bars', 16)) != bars:
         tech['bars_effective'] = bars
-    ramp = int(beat_dur * SR * 2)
+    # Vocal ramp window (was 2 beats, now 4) — smoother fade-in of incoming
+    # vocals after stem-additive overlap. Tunable via env.
+    ramp_beats = float(os.environ.get('AIJOCKEY_VOCAL_RAMP_BEATS', '4'))
+    ramp = int(beat_dur * SR * ramp_beats)
+    # Vocal-aware transition guard: when EITHER side has vocal_activity > 0.3,
+    # downgrade aggressive transition techniques to plain crossfade.
+    # AIJOCKEY_VOCAL_GUARD=0 to disable.
+    if os.environ.get('AIJOCKEY_VOCAL_GUARD', '1') != '0':
+        prev_va = float(((prev.get('entry') or {}).get('segment') or {}).get('vocal_activity') or 0.0)
+        cur_va = float(((cur.get('entry') or {}).get('segment') or {}).get('vocal_activity') or 0.0)
+        AGGRESSIVE_VS_VOCALS = {'drum_break', 'silence_drop', 'echo_out',
+                                'spinback', 'scratch_fill', 'pitch_bend'}
+        if name in AGGRESSIVE_VS_VOCALS and max(prev_va, cur_va) > 0.30:
+            print(f"[vocal_guard] {name} → crossfade "
+                  f"(prev_va={prev_va:.2f} cur_va={cur_va:.2f})")
+            tech['_vocal_guard_downgraded_from'] = name
+            name = 'crossfade'
+            tech['name'] = 'crossfade'
 
-    # DTW sub-sample alignment of the overlap region. Targets sample-jitter
-    # class of phase cancellation (5-30ms beat-tracker imprecision documented
-    # in cohort verdict: spectral_phasing = 93% of severity). Module
-    # auto-skips when xcorr confidence too low (pool too disparate to align
-    # reliably) — see src/dtw_align.py for safety gates.
+    # DTW sub-sample alignment of the overlap region. Runs AFTER vocal_guard
+    # so the (possibly downgraded) transition technique sees the aligned
+    # head. Targets sample-jitter class of phase cancellation (5-30ms
+    # beat-tracker imprecision). Module auto-skips when xcorr confidence
+    # too low (pool too disparate to align reliably).
     # Default OFF; enable with AIJOCKEY_DTW_ALIGN=1.
     try:
         from dtw_align import enabled as _dtw_enabled, align_overlap as _dtw_align_overlap
@@ -582,7 +613,6 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
                       f"({1000.0 * _shift_samples / SR:+.1f}ms) conf={_conf:.2f}")
     except Exception as _e:
         print(f"[dtw] skipped: {_e.__class__.__name__}: {_e}")
-
     # Build vocal-suppressed cur for overlap-style transitions
     cur_no_intro_vox = dict(cur)
     cur_no_intro_vox['full'] = _suppress_intro_vocals(
