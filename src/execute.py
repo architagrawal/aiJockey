@@ -667,17 +667,46 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
     # vocals after stem-additive overlap. Tunable via env.
     ramp_beats = float(os.environ.get('AIJOCKEY_VOCAL_RAMP_BEATS', '4'))
     ramp = int(beat_dur * SR * ramp_beats)
-    # Vocal-aware transition guard: when EITHER side has vocal_activity > 0.3,
-    # downgrade aggressive transition techniques to plain crossfade.
-    # AIJOCKEY_VOCAL_GUARD=0 to disable.
+    # Vocal-aware transition guard (per docs/dj_research.md §6, §10):
+    #
+    # Vocals tolerate frequency-band swaps, filter sweeps, echo/reverb,
+    # drum-only manipulation, and stem swaps. They DON'T tolerate
+    # time/pitch warps and per-sample manipulation that shreds the vocal
+    # waveform itself.
+    #
+    # Two-tier gating:
+    #   - SHREDDERS (always reject when vocals present > 0.30):
+    #       time/pitch warps + per-sample mangling
+    #   - HEAVY (reject only when vocals DENSE > 0.55):
+    #       drum manipulations that may briefly imbalance with vocal —
+    #       fine for verse-level vocals, risky over chorus hooks
+    #   - SAFE (always pass): everything else (eq_swap, bass_swap,
+    #       echo_out, drum_break, silence_drop, filter_fade, stem_swap,
+    #       acapella_drop, mashup, etc.)
+    # AIJOCKEY_VOCAL_GUARD=0 to disable; AIJOCKEY_VOCAL_GUARD_THR overrides
+    # the SHREDDERS threshold (default 0.30); AIJOCKEY_VOCAL_GUARD_THR_HEAVY
+    # overrides HEAVY threshold (default 0.55).
     if os.environ.get('AIJOCKEY_VOCAL_GUARD', '1') != '0':
         prev_va = float(((prev.get('entry') or {}).get('segment') or {}).get('vocal_activity') or 0.0)
         cur_va = float(((cur.get('entry') or {}).get('segment') or {}).get('vocal_activity') or 0.0)
-        AGGRESSIVE_VS_VOCALS = {'drum_break', 'silence_drop', 'echo_out',
-                                'spinback', 'scratch_fill', 'pitch_bend'}
-        if name in AGGRESSIVE_VS_VOCALS and max(prev_va, cur_va) > 0.30:
+        thr_shred = float(os.environ.get('AIJOCKEY_VOCAL_GUARD_THR', '0.30'))
+        thr_heavy = float(os.environ.get('AIJOCKEY_VOCAL_GUARD_THR_HEAVY', '0.55'))
+        SHREDDERS = {'pitch_bend', 'bpm_warp', 'tape_stop', 'chop',
+                     'scratch_fill', 'beat_juggle', 'loop_roll',
+                     'loop_tighten', 'spectral_hold', 'spinback',
+                     'forward_spin'}
+        HEAVY = {'drum_replace', 'kickless_swap', 'snare_buildup',
+                 'build_riser_drop', 'punch_in'}
+        max_va = max(prev_va, cur_va)
+        downgrade = False
+        reason = ''
+        if name in SHREDDERS and max_va > thr_shred:
+            downgrade, reason = True, f'shredder>{thr_shred}'
+        elif name in HEAVY and max_va > thr_heavy:
+            downgrade, reason = True, f'heavy>{thr_heavy}'
+        if downgrade:
             print(f"[vocal_guard] {name} → crossfade "
-                  f"(prev_va={prev_va:.2f} cur_va={cur_va:.2f})")
+                  f"({reason}, prev_va={prev_va:.2f} cur_va={cur_va:.2f})")
             tech['_vocal_guard_downgraded_from'] = name
             name = 'crossfade'
             tech['name'] = 'crossfade'
