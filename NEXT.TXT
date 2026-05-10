@@ -35,6 +35,11 @@ Tier 1 — high-impact, low-friction (do after demo ships)
   - Repo: isdood/ACE-Step-ROCm (https://github.com/isdood/ACE-Step-ROCm)
   - Generate 8-bar bridges between BPM/genre-incompatible clips.
   - Stable Audio Open 1.5 also viable (CC-trained data, no copyright issues).
+  - Alt: InstructME (latent diffusion + chord-progression matrix
+    constraint, multi-round edits). Stronger harmonic preservation
+    than ACE-Step; ROCm support not validated. Re-evaluate if ACE-Step
+    drift turns out high in transition-bridge use.
+    Paper: arXiv 2308.14360
 
   Tier 3 — research-grade, experimental
 
@@ -59,6 +64,57 @@ Tier 1 — high-impact, low-friction (do after demo ships)
   - Trigger: after H lands All-In-One in src/all_in_one_wrapper.py
   - Wire-in: ~50 lines in src/planner.py (replace junction-pick branch)
   - Cost: free at inference (segments already computed for the labels)
+
+  I. EDMFormer — genre-specific structure for EDM pool (lands: tier1-upgrades)
+  Transformer for EDM-only structural segmentation: drop, buildup,
+  breakdown labels that All-In-One (trained on Western pop) misses.
+  AiJockey clip pool is EDM-heavy — All-In-One verse/chorus labels
+  systematically wrong for techno/dubstep/dnb/hardstyle where structure
+  is spectral-density driven, not chord-driven.
+  - Wire: invoke conditionally when Director classifies pool as EDM
+    (existing genre tag from prefix); fall back to All-In-One for
+    pop/non-EDM.
+  - Pairs with H (candidate-scored picker) — picker scores against
+    drop/buildup labels instead of pop verse/chorus.
+  - Paper: EDMFormer (arXiv 2603.08759)
+
+  J. COCOLA scorer — stem-compat gate before mashup/stem_swap (lands: tier1-upgrades)
+  Deep model predicting whether two isolated stems sound pleasant when
+  played simultaneously (e.g. vocals-of-A over instr-of-B). Cheap pre-flight
+  gate for Director's mashup_transition + stem_swap_transition picks —
+  reject incompatible pairs before render instead of catching dissonance
+  post-render in critic_v2 / probes.
+  - Wire: in planner.py mashup-pick branch. Score candidate stem pairs;
+    reject below threshold; cascade to crossfade.
+  - Source: AutoMashup paper (arXiv 2508.06516); COCOLA mentioned in
+    multi-agent remix survey.
+
+  K. FAD critic head — distributional similarity vs dj_sets_mp3 (lands: best-output-pipeline)
+  Frechet Audio Distance between rendered mix embedding and dj_sets_mp3
+  reference corpus distribution. Reference corpus already snapshot-pinned
+  (~2.5 GB, 25 sets). Adds a third critic head alongside probes (rule-based)
+  + Audiobox Aesthetics (perceptual). FAD captures "does this sound like
+  a real DJ mix" — orthogonal signal.
+  - Wire: src/fad_score.py + X-FAD header in /generate. PANN/VGGish
+    embedding extractor, single Gaussian fit on reference corpus
+    (precompute, cache). Per-render: extract embed, compute FAD vs
+    cached reference Gaussian.
+  - Use: ship gate alongside severity + Audiobox. DPO reward candidate.
+  - Reference: AI Music Remixing System Design doc (Critic metric matrix).
+
+  L. MusRec timbre morphing in transition window (lands: tier1-upgrades, Tier 3)
+  Zero-shot rectified-flow text-to-music editor. Morphs timbre of
+  outgoing stem during the crossfade window (e.g. distorted-rock guitar
+  → synth-pad over 8 bars) so cross-genre transitions don't feel like
+  hard cuts. Operates only at transition boundary — non-destructive to
+  source identity.
+  - Use case: when Director picks a high-genre-distance handoff (rock →
+    deep-house), invoke MusRec on outgoing 'other' stem with prompt
+    derived from incoming clip's CLAP caption. Bounded to overlap region.
+  - Paper: MusRec (arXiv 2511.04376). Inversion + attention replacement
+    via RF-Solver.
+  - Cost: heavy (diffusion). Tier 3 — only after E (ACE-Step) latency
+    profile understood.
 
   Cross-cutting techniques NOT yet evaluated (worth follow-up)
 
