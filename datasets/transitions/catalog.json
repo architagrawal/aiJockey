@@ -1,491 +1,1058 @@
 {
   "version": 1,
-  "_doc": "Canonical DJ transition vocabulary. Pure reference catalog — Director / planner / execute may consume any subset, none, or extend with custom techniques. Each entry: name, category, tier (Phase-1 mapping), implementation_status, typical_bars range, best_for section labels, incompatible_with section labels, description, params. status: 'implemented' present in src/transitions.py; 'stub' has function signature but body falls back; 'planned' not coded yet.",
-
+  "_doc": "Canonical DJ transition vocabulary. Pure reference catalog \u2014 Director / planner / execute may consume any subset, none, or extend with custom techniques. Each entry: name, category, tier (Phase-1 mapping), implementation_status, typical_bars range, best_for section labels, incompatible_with section labels, description, params. status: 'implemented' present in src/transitions.py; 'stub' has function signature but body falls back; 'planned' not coded yet.",
   "techniques": [
     {
       "name": "crossfade",
       "category": "fade",
       "tier": "minor",
       "implementation_status": "implemented",
-      "typical_bars": [4, 16],
-      "best_for": ["verse", "inst", "chorus", "bridge"],
+      "typical_bars": [
+        4,
+        16
+      ],
+      "best_for": [
+        "verse",
+        "inst",
+        "chorus",
+        "bridge"
+      ],
       "incompatible_with": [],
       "description": "Equal-power crossfade. Outgoing fades to silence while incoming rises. Workhorse minor-tier transition.",
-      "params": {"bars": "int", "curve": "equal_power|linear"}
+      "params": {
+        "bars": "int",
+        "curve": "equal_power|linear"
+      },
+      "vocal_safe": true
     },
     {
       "name": "short_crossfade",
       "category": "fade",
       "tier": "minor",
       "implementation_status": "implemented",
-      "typical_bars": [2, 4],
-      "best_for": ["chorus", "drop"],
-      "incompatible_with": ["intro", "outro"],
+      "typical_bars": [
+        2,
+        4
+      ],
+      "best_for": [
+        "chorus",
+        "drop"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro"
+      ],
       "description": "Punchy 2-4 bar crossfade. Quick handoff when both clips share BPM and key.",
-      "params": {"bars": "int"}
+      "params": {
+        "bars": "int"
+      },
+      "vocal_safe": true
     },
     {
       "name": "long_crossfade",
       "category": "fade",
       "tier": "minor",
       "implementation_status": "implemented",
-      "typical_bars": [16, 64],
-      "best_for": ["intro", "outro", "verse"],
-      "incompatible_with": ["drop", "chorus"],
+      "typical_bars": [
+        16,
+        64
+      ],
+      "best_for": [
+        "intro",
+        "outro",
+        "verse"
+      ],
+      "incompatible_with": [
+        "drop",
+        "chorus"
+      ],
       "description": "Slow 16-64 bar blend. Ambient / chillout style. Use when texture matters more than rhythm.",
-      "params": {"bars": "int"}
+      "params": {
+        "bars": "int"
+      },
+      "vocal_safe": true
     },
-
     {
       "name": "eq_swap",
       "category": "eq",
       "tier": "minor",
       "implementation_status": "implemented",
-      "typical_bars": [8, 16],
-      "best_for": ["verse", "inst", "chorus"],
+      "typical_bars": [
+        8,
+        16
+      ],
+      "best_for": [
+        "verse",
+        "inst",
+        "chorus"
+      ],
       "incompatible_with": [],
-      "description": "Bring in incoming highs while killing outgoing highs over the overlap window. Volumes stay equal — frequencies do the swap. The DJ workhorse.",
-      "params": {"bars": "int", "split_freq_hz": "float"}
+      "description": "Bring in incoming highs while killing outgoing highs over the overlap window. Volumes stay equal \u2014 frequencies do the swap. The DJ workhorse.",
+      "params": {
+        "bars": "int",
+        "split_freq_hz": "float"
+      },
+      "vocal_safe": true
     },
     {
       "name": "bass_swap",
       "category": "eq",
       "tier": "minor",
-      "implementation_status": "planned",
-      "typical_bars": [4, 8],
-      "best_for": ["verse", "inst"],
-      "incompatible_with": ["intro"],
+      "implementation_status": "implemented",
+      "typical_bars": [
+        4,
+        8
+      ],
+      "best_for": [
+        "verse",
+        "inst"
+      ],
+      "incompatible_with": [
+        "intro"
+      ],
       "description": "Kill outgoing bass on a beat boundary; bring incoming bass in. Avoids muddy double-bass region.",
-      "params": {"bars": "int", "cutoff_hz": "float"}
+      "params": {
+        "bars": "int",
+        "cutoff_hz": "float"
+      },
+      "vocal_safe": true
     },
     {
       "name": "highs_swap",
       "category": "eq",
       "tier": "minor",
-      "implementation_status": "planned",
-      "typical_bars": [4, 8],
-      "best_for": ["verse", "inst", "bridge"],
+      "implementation_status": "implemented",
+      "typical_bars": [
+        4,
+        8
+      ],
+      "best_for": [
+        "verse",
+        "inst",
+        "bridge"
+      ],
       "incompatible_with": [],
       "description": "Swap top end (cymbals/hihats) while leaving low/mid intact. Subtle stem-of-stems mix.",
-      "params": {"bars": "int", "cutoff_hz": "float"}
+      "params": {
+        "bars": "int",
+        "cutoff_hz": "float"
+      },
+      "vocal_safe": true
     },
     {
       "name": "frequency_blend",
       "category": "eq",
       "tier": "major",
       "implementation_status": "planned",
-      "typical_bars": [8, 16],
-      "best_for": ["bridge", "inst"],
-      "incompatible_with": ["intro"],
+      "typical_bars": [
+        8,
+        16
+      ],
+      "best_for": [
+        "bridge",
+        "inst"
+      ],
+      "incompatible_with": [
+        "intro"
+      ],
       "description": "Each track owns half the spectrum during overlap (e.g. outgoing keeps lows, incoming keeps highs). 4-band split optional.",
-      "params": {"bars": "int", "crossover_hz": ["float"], "owner_per_band": ["prev|cur"]}
+      "params": {
+        "bars": "int",
+        "crossover_hz": [
+          "float"
+        ],
+        "owner_per_band": [
+          "prev|cur"
+        ]
+      },
+      "vocal_safe": true
     },
-
     {
       "name": "filter_fade",
       "category": "filter",
       "tier": "major",
       "implementation_status": "implemented",
-      "typical_bars": [8, 16],
-      "best_for": ["verse", "bridge", "outro"],
-      "incompatible_with": ["drop"],
+      "typical_bars": [
+        8,
+        16
+      ],
+      "best_for": [
+        "verse",
+        "bridge",
+        "outro"
+      ],
+      "incompatible_with": [
+        "drop"
+      ],
       "description": "Lowpass filter sweeps DOWN on outgoing while incoming enters at full spectrum. Classic build-tension move.",
-      "params": {"bars": "int", "min_cutoff_hz": "float", "max_cutoff_hz": "float"}
+      "params": {
+        "bars": "int",
+        "min_cutoff_hz": "float",
+        "max_cutoff_hz": "float"
+      },
+      "vocal_safe": true
     },
     {
       "name": "highpass_sweep_in",
       "category": "filter",
       "tier": "major",
-      "implementation_status": "planned",
-      "typical_bars": [8, 16],
-      "best_for": ["chorus", "drop"],
+      "implementation_status": "implemented",
+      "typical_bars": [
+        8,
+        16
+      ],
+      "best_for": [
+        "chorus",
+        "drop"
+      ],
       "incompatible_with": [],
       "description": "Incoming starts highpassed (top-end only) and sweeps DOWN to full spectrum. Reverse of filter_fade. Builds anticipation.",
-      "params": {"bars": "int", "min_cutoff_hz": "float", "max_cutoff_hz": "float"}
+      "params": {
+        "bars": "int",
+        "min_cutoff_hz": "float",
+        "max_cutoff_hz": "float"
+      },
+      "vocal_safe": true
     },
     {
       "name": "band_filter_sweep",
       "category": "filter",
       "tier": "major",
       "implementation_status": "planned",
-      "typical_bars": [4, 8],
-      "best_for": ["inst", "bridge"],
-      "incompatible_with": ["drop"],
+      "typical_bars": [
+        4,
+        8
+      ],
+      "best_for": [
+        "inst",
+        "bridge"
+      ],
+      "incompatible_with": [
+        "drop"
+      ],
       "description": "Narrow band-pass sweeps across the spectrum during overlap. Telephone-effect into hi-fi.",
-      "params": {"bars": "int", "q": "float", "sweep_direction": "up|down|cycle"}
+      "params": {
+        "bars": "int",
+        "q": "float",
+        "sweep_direction": "up|down|cycle"
+      },
+      "vocal_safe": true
     },
-
     {
       "name": "cut",
       "category": "cut",
       "tier": "cut",
       "implementation_status": "implemented",
-      "typical_bars": [0, 0],
-      "best_for": ["chorus", "drop"],
-      "incompatible_with": ["intro", "outro"],
+      "typical_bars": [
+        0,
+        0
+      ],
+      "best_for": [
+        "chorus",
+        "drop"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro"
+      ],
       "description": "Hard cut on the 1. Theatrical, rare. Land on a downbeat where outgoing has finished a phrase.",
-      "params": {}
+      "params": {},
+      "vocal_safe": false
     },
     {
       "name": "punch_in",
       "category": "cut",
       "tier": "cut",
-      "implementation_status": "planned",
-      "typical_bars": [0, 0],
-      "best_for": ["chorus", "drop"],
-      "incompatible_with": ["intro"],
+      "implementation_status": "implemented",
+      "typical_bars": [
+        0,
+        0
+      ],
+      "best_for": [
+        "chorus",
+        "drop"
+      ],
+      "incompatible_with": [
+        "intro"
+      ],
       "description": "Hard cut to incoming on a strong beat (often 1 of bar 1 of phrase). Same as 'cut' but with optional anti-click ramp ~5ms.",
-      "params": {"anti_click_ms": "float"}
+      "params": {
+        "anti_click_ms": "float"
+      },
+      "vocal_safe": false
     },
     {
       "name": "chop",
       "category": "cut",
       "tier": "loop",
-      "implementation_status": "planned",
-      "typical_bars": [1, 4],
-      "best_for": ["chorus", "drop"],
-      "incompatible_with": ["intro", "outro"],
+      "implementation_status": "implemented",
+      "typical_bars": [
+        1,
+        4
+      ],
+      "best_for": [
+        "chorus",
+        "drop"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro"
+      ],
       "description": "Rapid 1/4 or 1/8 alternation between outgoing and incoming. Ravers love. Limit to 1-2 per set.",
-      "params": {"chop_period_beats": "float", "n_chops": "int"}
+      "params": {
+        "chop_period_beats": "float",
+        "n_chops": "int"
+      },
+      "vocal_safe": false
     },
-
     {
       "name": "build_riser_drop",
       "category": "drop",
       "tier": "drop",
       "implementation_status": "stub",
-      "typical_bars": [8, 16],
-      "best_for": ["drop", "chorus", "pre_drop"],
-      "incompatible_with": ["intro", "outro", "break"],
+      "typical_bars": [
+        8,
+        16
+      ],
+      "best_for": [
+        "drop",
+        "chorus",
+        "pre_drop"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro",
+        "break"
+      ],
       "description": "Riser on outgoing's last 8 bars + kick removed last 2 + impact on the 1 + incoming drop. Engineered climax.",
-      "params": {"riser_beats": "int", "kickless_beats": "int", "impact_gain_db": "float"}
+      "params": {
+        "riser_beats": "int",
+        "kickless_beats": "int",
+        "impact_gain_db": "float"
+      },
+      "vocal_safe": false
     },
     {
       "name": "silence_drop",
       "category": "drop",
       "tier": "drop",
       "implementation_status": "implemented",
-      "typical_bars": [0, 4],
-      "best_for": ["drop", "chorus"],
-      "incompatible_with": ["intro", "outro"],
+      "typical_bars": [
+        0,
+        4
+      ],
+      "best_for": [
+        "drop",
+        "chorus"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro"
+      ],
       "description": "Hold N beats of silence + boom impact + incoming drops on the 1. Theatrical.",
-      "params": {"silence_beats": "int", "impact_gain_db": "float"}
+      "params": {
+        "silence_beats": "int",
+        "impact_gain_db": "float"
+      },
+      "vocal_safe": false
     },
     {
       "name": "snare_buildup",
       "category": "drop",
       "tier": "drop",
       "implementation_status": "stub",
-      "typical_bars": [4, 8],
-      "best_for": ["drop", "chorus"],
-      "incompatible_with": ["intro", "outro", "break"],
-      "description": "Snare roll accelerates 1/4 → 1/8 → 1/16 over 4 bars before incoming drops. Standard EDM lead-in.",
-      "params": {"buildup_bars": "int", "snare_density_curve": "linear|exp"}
+      "typical_bars": [
+        4,
+        8
+      ],
+      "best_for": [
+        "drop",
+        "chorus"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro",
+        "break"
+      ],
+      "description": "Snare roll accelerates 1/4 \u2192 1/8 \u2192 1/16 over 4 bars before incoming drops. Standard EDM lead-in.",
+      "params": {
+        "buildup_bars": "int",
+        "snare_density_curve": "linear|exp"
+      },
+      "vocal_safe": false
     },
     {
       "name": "breakdown_to_drop",
       "category": "drop",
       "tier": "drop",
       "implementation_status": "planned",
-      "typical_bars": [8, 16],
-      "best_for": ["drop", "chorus"],
-      "incompatible_with": ["intro"],
+      "typical_bars": [
+        8,
+        16
+      ],
+      "best_for": [
+        "drop",
+        "chorus"
+      ],
+      "incompatible_with": [
+        "intro"
+      ],
       "description": "Use outgoing's breakdown section as the build into incoming's drop. Section-aware: needs prev_section='break' and cur_section='drop'.",
-      "params": {"bars": "int"}
+      "params": {
+        "bars": "int"
+      },
+      "vocal_safe": false
     },
-
     {
       "name": "loop_tighten",
       "category": "loop",
       "tier": "loop",
       "implementation_status": "implemented",
-      "typical_bars": [2, 4],
-      "best_for": ["chorus", "verse"],
-      "incompatible_with": ["intro", "outro"],
-      "description": "DJ stutter — loop the last bar progressively tighter (1/2 → 1/4 → 1/8) before handing off. Build tension into the new track.",
-      "params": {"loop_period_beats": "float[]"}
+      "typical_bars": [
+        2,
+        4
+      ],
+      "best_for": [
+        "chorus",
+        "verse"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro"
+      ],
+      "description": "DJ stutter \u2014 loop the last bar progressively tighter (1/2 \u2192 1/4 \u2192 1/8) before handing off. Build tension into the new track.",
+      "params": {
+        "loop_period_beats": "float[]"
+      },
+      "vocal_safe": false
     },
     {
       "name": "loop_callback",
       "category": "loop",
       "tier": "loop",
       "implementation_status": "implemented",
-      "typical_bars": [2, 8],
-      "best_for": ["chorus"],
-      "incompatible_with": ["intro", "outro", "break"],
+      "typical_bars": [
+        2,
+        8
+      ],
+      "best_for": [
+        "chorus"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro",
+        "break"
+      ],
       "description": "Return to a hook from earlier in the set as a bridge. Director's callback_budget controls usage. Section-aware: must hit during a chorus / hook.",
-      "params": {"hook_id": "string", "repetitions": "int"}
+      "params": {
+        "hook_id": "string",
+        "repetitions": "int"
+      },
+      "vocal_safe": true
     },
     {
       "name": "loop_roll",
       "category": "loop",
       "tier": "loop",
-      "implementation_status": "planned",
-      "typical_bars": [1, 4],
-      "best_for": ["chorus", "drop"],
-      "incompatible_with": ["intro", "outro"],
-      "description": "Progressive loop halving 1/2 → 1/4 → 1/8 → 1/16 → cut. Like loop_tighten but more aggressive. Single-bar setup.",
-      "params": {"steps": "int"}
+      "implementation_status": "implemented",
+      "typical_bars": [
+        1,
+        4
+      ],
+      "best_for": [
+        "chorus",
+        "drop"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro"
+      ],
+      "description": "Progressive loop halving 1/2 \u2192 1/4 \u2192 1/8 \u2192 1/16 \u2192 cut. Like loop_tighten but more aggressive. Single-bar setup.",
+      "params": {
+        "steps": "int"
+      },
+      "vocal_safe": false
     },
     {
       "name": "beat_juggle",
       "category": "loop",
       "tier": "loop",
-      "implementation_status": "planned",
-      "typical_bars": [2, 4],
-      "best_for": ["bridge"],
-      "incompatible_with": ["intro", "outro", "break"],
+      "implementation_status": "implemented",
+      "typical_bars": [
+        2,
+        4
+      ],
+      "best_for": [
+        "bridge"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro",
+        "break"
+      ],
       "description": "Alternate 1-bar loops between outgoing and incoming. Skill-DJ technique. 2-4 bars typical.",
-      "params": {"juggle_period_beats": "float", "n_juggles": "int"}
+      "params": {
+        "juggle_period_beats": "float",
+        "n_juggles": "int"
+      },
+      "vocal_safe": false
     },
-
     {
       "name": "stem_swap",
       "category": "stem",
       "tier": "major",
       "implementation_status": "implemented",
-      "typical_bars": [8, 16],
-      "best_for": ["verse", "inst", "bridge"],
+      "typical_bars": [
+        8,
+        16
+      ],
+      "best_for": [
+        "verse",
+        "inst",
+        "bridge"
+      ],
       "incompatible_with": [],
-      "description": "Replace one stem at a time during overlap (vocals, then drums, then bass). Cleaner than full crossfade — preserves rhythm continuity.",
-      "params": {"bars": "int", "stem_order": ["vocals", "drums", "bass", "other"]}
+      "description": "Replace one stem at a time during overlap (vocals, then drums, then bass). Cleaner than full crossfade \u2014 preserves rhythm continuity.",
+      "params": {
+        "bars": "int",
+        "stem_order": [
+          "vocals",
+          "drums",
+          "bass",
+          "other"
+        ]
+      },
+      "vocal_safe": true
     },
     {
       "name": "mashup",
       "category": "stem",
       "tier": "major",
       "implementation_status": "implemented",
-      "typical_bars": [8, 32],
-      "best_for": ["verse", "chorus"],
-      "incompatible_with": ["intro", "outro"],
+      "typical_bars": [
+        8,
+        32
+      ],
+      "best_for": [
+        "verse",
+        "chorus"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro"
+      ],
       "description": "Vocals from one track over instrumental of another for an extended overlap. Requires key + tempo compat. Crowd-pleaser.",
-      "params": {"bars": "int", "vocal_source": "prev|cur"}
+      "params": {
+        "bars": "int",
+        "vocal_source": "prev|cur"
+      },
+      "vocal_safe": true
     },
     {
       "name": "acapella_drop",
       "category": "stem",
       "tier": "drop",
-      "implementation_status": "planned",
-      "typical_bars": [4, 16],
-      "best_for": ["chorus", "drop"],
-      "incompatible_with": ["intro", "outro", "break", "inst"],
+      "implementation_status": "implemented",
+      "typical_bars": [
+        4,
+        16
+      ],
+      "best_for": [
+        "chorus",
+        "drop"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro",
+        "break",
+        "inst"
+      ],
       "description": "Strip outgoing to vocals only over a phrase, then incoming's drop hits. Very effective on famous-vocal tracks.",
-      "params": {"vocal_only_bars": "int"}
+      "params": {
+        "vocal_only_bars": "int"
+      },
+      "vocal_safe": false
     },
     {
       "name": "instrumental_swap",
       "category": "stem",
       "tier": "minor",
-      "implementation_status": "planned",
-      "typical_bars": [8, 16],
-      "best_for": ["verse", "inst"],
-      "incompatible_with": ["intro"],
+      "implementation_status": "implemented",
+      "typical_bars": [
+        8,
+        16
+      ],
+      "best_for": [
+        "verse",
+        "inst"
+      ],
+      "incompatible_with": [
+        "intro"
+      ],
       "description": "Swap full instrumental backing while vocals continue. Vocal stem of outgoing held; drums/bass/other from incoming. Like mashup but vocal source is the OUTgoing track.",
-      "params": {"bars": "int"}
+      "params": {
+        "bars": "int"
+      },
+      "vocal_safe": true
     },
-
     {
       "name": "echo_out",
       "category": "fx",
       "tier": "major",
       "implementation_status": "implemented",
-      "typical_bars": [4, 8],
-      "best_for": ["outro", "bridge"],
-      "incompatible_with": ["drop"],
+      "typical_bars": [
+        4,
+        8
+      ],
+      "best_for": [
+        "outro",
+        "bridge"
+      ],
+      "incompatible_with": [
+        "drop"
+      ],
       "description": "Outgoing tail goes into delay (1/2 or 1/4 beat) with feedback while incoming starts. Classic 'fade to next' move.",
-      "params": {"delay_beats": "float", "feedback": "float", "wet_gain": "float"}
+      "params": {
+        "delay_beats": "float",
+        "feedback": "float",
+        "wet_gain": "float"
+      },
+      "vocal_safe": true
     },
     {
       "name": "reverb_wash",
       "category": "fx",
       "tier": "major",
-      "implementation_status": "planned",
-      "typical_bars": [4, 8],
-      "best_for": ["outro", "bridge", "break"],
-      "incompatible_with": ["drop"],
+      "implementation_status": "implemented",
+      "typical_bars": [
+        4,
+        8
+      ],
+      "best_for": [
+        "outro",
+        "bridge",
+        "break"
+      ],
+      "incompatible_with": [
+        "drop"
+      ],
       "description": "Outgoing tail soaked in long reverb (2-4s decay) as bridge to incoming. Atmospheric / cinematic.",
-      "params": {"decay_sec": "float", "wet_gain": "float"}
+      "params": {
+        "decay_sec": "float",
+        "wet_gain": "float"
+      },
+      "vocal_safe": true
     },
     {
       "name": "spinback",
       "category": "fx",
       "tier": "cut",
       "implementation_status": "implemented",
-      "typical_bars": [1, 2],
-      "best_for": ["chorus", "drop"],
-      "incompatible_with": ["intro", "outro", "break"],
+      "typical_bars": [
+        1,
+        2
+      ],
+      "best_for": [
+        "chorus",
+        "drop"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro",
+        "break"
+      ],
       "description": "Vinyl-style backwards pitch decel to silence over 1-2 bars + incoming hard cut on the 1. Classic hardcore / rock DJ exit.",
-      "params": {"decel_beats": "float"}
+      "params": {
+        "decel_beats": "float"
+      },
+      "vocal_safe": false
     },
     {
       "name": "forward_spin",
       "category": "fx",
       "tier": "cut",
-      "implementation_status": "planned",
-      "typical_bars": [1, 2],
-      "best_for": ["chorus"],
-      "incompatible_with": ["intro", "outro"],
+      "implementation_status": "implemented",
+      "typical_bars": [
+        1,
+        2
+      ],
+      "best_for": [
+        "chorus"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro"
+      ],
       "description": "Pitch-up acceleration of outgoing into noise + incoming drops. Reverse of spinback.",
-      "params": {"accel_beats": "float", "max_pitch_ratio": "float"}
+      "params": {
+        "accel_beats": "float",
+        "max_pitch_ratio": "float"
+      },
+      "vocal_safe": false
     },
     {
       "name": "tape_stop",
       "category": "fx",
       "tier": "cut",
-      "implementation_status": "planned",
-      "typical_bars": [1, 1],
-      "best_for": ["chorus", "drop"],
-      "incompatible_with": ["intro", "outro"],
+      "implementation_status": "implemented",
+      "typical_bars": [
+        1,
+        1
+      ],
+      "best_for": [
+        "chorus",
+        "drop"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro"
+      ],
       "description": "Vari-speed slowdown that drops pitch + tempo to zero over 1 bar. More extreme than spinback.",
-      "params": {"slow_beats": "float", "curve": "linear|exp"}
+      "params": {
+        "slow_beats": "float",
+        "curve": "linear|exp"
+      },
+      "vocal_safe": false
     },
     {
       "name": "pitch_bend",
       "category": "fx",
       "tier": "major",
       "implementation_status": "implemented",
-      "typical_bars": [4, 8],
-      "best_for": ["bridge", "inst"],
-      "incompatible_with": ["chorus", "drop"],
+      "typical_bars": [
+        4,
+        8
+      ],
+      "best_for": [
+        "bridge",
+        "inst"
+      ],
+      "incompatible_with": [
+        "chorus",
+        "drop"
+      ],
       "description": "Gradual semitone shift of outgoing to bridge to incoming's key over 4-8 bars. Use when keys are 2-3 semitones apart.",
-      "params": {"semitones_per_bar": "float", "bars": "int"}
+      "params": {
+        "semitones_per_bar": "float",
+        "bars": "int"
+      },
+      "vocal_safe": false
     },
     {
       "name": "scratch_fill",
       "category": "fx",
       "tier": "loop",
       "implementation_status": "implemented",
-      "typical_bars": [1, 2],
-      "best_for": ["bridge", "chorus"],
-      "incompatible_with": ["intro", "outro"],
+      "typical_bars": [
+        1,
+        2
+      ],
+      "best_for": [
+        "bridge",
+        "chorus"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro"
+      ],
       "description": "Vinyl-style scratch sample fills 1-2 bars between outgoing fadeout and incoming start. Hip-hop / turntablist signature.",
-      "params": {"scratch_pattern": "string"}
+      "params": {
+        "scratch_pattern": "string"
+      },
+      "vocal_safe": false
     },
-
     {
       "name": "drum_break",
       "category": "drum",
       "tier": "major",
       "implementation_status": "implemented",
-      "typical_bars": [4, 8],
-      "best_for": ["break", "bridge"],
-      "incompatible_with": ["intro", "outro", "drop"],
+      "typical_bars": [
+        4,
+        8
+      ],
+      "best_for": [
+        "break",
+        "bridge"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro",
+        "drop"
+      ],
       "description": "Drum stem of outgoing continues solo over 4-8 bars while non-drum stems fade out, then incoming arrives full. Section-aware: prev clip needs a 'break' label or strong drum-only segment.",
-      "params": {"bars": "int"}
+      "params": {
+        "bars": "int"
+      },
+      "vocal_safe": false
     },
     {
       "name": "kickless_swap",
       "category": "drum",
       "tier": "major",
-      "implementation_status": "planned",
-      "typical_bars": [4, 8],
-      "best_for": ["bridge", "verse"],
-      "incompatible_with": ["intro", "drop"],
+      "implementation_status": "implemented",
+      "typical_bars": [
+        4,
+        8
+      ],
+      "best_for": [
+        "bridge",
+        "verse"
+      ],
+      "incompatible_with": [
+        "intro",
+        "drop"
+      ],
       "description": "Remove kick drum from both tracks during overlap. Avoids competing kick patterns. Re-add kick on incoming downbeat.",
-      "params": {"bars": "int"}
+      "params": {
+        "bars": "int"
+      },
+      "vocal_safe": false
     },
     {
       "name": "drum_replace",
       "category": "drum",
       "tier": "major",
-      "implementation_status": "planned",
-      "typical_bars": [4, 8],
-      "best_for": ["bridge", "verse"],
-      "incompatible_with": ["intro", "outro"],
+      "implementation_status": "implemented",
+      "typical_bars": [
+        4,
+        8
+      ],
+      "best_for": [
+        "bridge",
+        "verse"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro"
+      ],
       "description": "Swap drum stem from outgoing to incoming early, while non-drum stems from outgoing continue, then full handoff. Tempo-match required.",
-      "params": {"bars": "int"}
+      "params": {
+        "bars": "int"
+      },
+      "vocal_safe": false
     },
-
     {
       "name": "riser_overlay",
       "category": "fx_layer",
       "tier": "drop",
       "implementation_status": "implemented",
-      "typical_bars": [4, 8],
-      "best_for": ["drop", "chorus"],
-      "incompatible_with": ["intro", "outro", "break"],
+      "typical_bars": [
+        4,
+        8
+      ],
+      "best_for": [
+        "drop",
+        "chorus"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro",
+        "break"
+      ],
       "description": "Overlay synth riser on outgoing's last 4-8 bars to set up incoming. Already supported as accent_hint.",
-      "params": {"sample_id": "string", "duration_beats": "float", "gain_db": "float"}
+      "params": {
+        "sample_id": "string",
+        "duration_beats": "float",
+        "gain_db": "float"
+      },
+      "vocal_safe": true
     },
     {
       "name": "impact_overlay",
       "category": "fx_layer",
       "tier": "drop",
       "implementation_status": "implemented",
-      "typical_bars": [0, 0],
-      "best_for": ["drop", "chorus"],
+      "typical_bars": [
+        0,
+        0
+      ],
+      "best_for": [
+        "drop",
+        "chorus"
+      ],
       "incompatible_with": [],
       "description": "Single boom impact on the 1 of incoming. Always paired with drop tier or hard cut.",
-      "params": {"sample_id": "string", "gain_db": "float"}
+      "params": {
+        "sample_id": "string",
+        "gain_db": "float"
+      },
+      "vocal_safe": true
     },
-
     {
       "name": "bpm_warp",
       "category": "tempo_bridge",
       "tier": "major",
-      "implementation_status": "planned",
-      "typical_bars": [16, 32],
-      "best_for": ["bridge", "verse"],
-      "incompatible_with": ["intro", "outro", "drop"],
+      "implementation_status": "implemented",
+      "typical_bars": [
+        16,
+        32
+      ],
+      "best_for": [
+        "bridge",
+        "verse"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro",
+        "drop"
+      ],
       "description": "Gradual tempo blend over 16-32 bars when prev/cur BPM differ by >8% (beyond the vocal_safe_stretch cap). Outgoing slows / incoming speeds toward midpoint. Long bridge required.",
-      "params": {"bars": "int", "midpoint_bpm": "float"}
+      "params": {
+        "bars": "int",
+        "midpoint_bpm": "float"
+      },
+      "vocal_safe": false
     },
     {
       "name": "key_shift_bridge",
       "category": "harmonic_bridge",
       "tier": "major",
       "implementation_status": "planned",
-      "typical_bars": [8, 16],
-      "best_for": ["bridge"],
-      "incompatible_with": ["intro", "outro", "drop"],
+      "typical_bars": [
+        8,
+        16
+      ],
+      "best_for": [
+        "bridge"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro",
+        "drop"
+      ],
       "description": "Gradually pitch-shift outgoing to bridge non-Camelot-compatible keys (distance >= 4). Different from pitch_bend in that the END key matches incoming exactly.",
-      "params": {"bars": "int", "target_camelot": "string"}
+      "params": {
+        "bars": "int",
+        "target_camelot": "string"
+      },
+      "vocal_safe": true
     },
     {
       "name": "harmonic_overlay",
       "category": "harmonic_bridge",
       "tier": "major",
-      "implementation_status": "planned",
-      "typical_bars": [4, 8],
-      "best_for": ["bridge", "break"],
-      "incompatible_with": ["drop"],
+      "implementation_status": "implemented",
+      "typical_bars": [
+        4,
+        8
+      ],
+      "best_for": [
+        "bridge",
+        "break"
+      ],
+      "incompatible_with": [
+        "drop"
+      ],
       "description": "Pad / sustained chord layer on bridge derived from harmonic content of both tracks. Glue for genre-jump or key-jump junctions.",
-      "params": {"pad_source": "synthesized|extracted", "bars": "int"}
+      "params": {
+        "pad_source": "synthesized|extracted",
+        "bars": "int"
+      },
+      "vocal_safe": true
     },
-
     {
       "name": "spectral_hold",
       "category": "spectral",
       "tier": "major",
-      "implementation_status": "planned",
-      "typical_bars": [2, 4],
-      "best_for": ["bridge", "break"],
-      "incompatible_with": ["drop"],
+      "implementation_status": "implemented",
+      "typical_bars": [
+        2,
+        4
+      ],
+      "best_for": [
+        "bridge",
+        "break"
+      ],
+      "incompatible_with": [
+        "drop"
+      ],
       "description": "Freeze harmonic content (FFT magnitude) of outgoing's last bar; hold while drums change. Glue layer for cross-genre jumps. Cited NEXT.TXT as cheap rule-based phase-cancel mitigation.",
-      "params": {"bars": "int", "phase_randomize": "bool"}
+      "params": {
+        "bars": "int",
+        "phase_randomize": "bool"
+      },
+      "vocal_safe": false
     },
     {
       "name": "neural_bridge",
       "category": "generative",
       "tier": "major",
       "implementation_status": "planned",
-      "typical_bars": [4, 16],
-      "best_for": ["bridge"],
-      "incompatible_with": ["intro", "outro", "drop"],
+      "typical_bars": [
+        4,
+        16
+      ],
+      "best_for": [
+        "bridge"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro",
+        "drop"
+      ],
       "description": "Generative model (ACE-Step / Stable Audio Open) creates 4-16 bars of audio interpolating outgoing's outro into incoming's intro. Tier-2 backlog (NEXT.TXT E).",
-      "params": {"bars": "int", "model_id": "string", "seed": "int"}
+      "params": {
+        "bars": "int",
+        "model_id": "string",
+        "seed": "int"
+      },
+      "vocal_safe": true
     }
   ],
-
   "tier_summary": {
-    "minor": ["crossfade", "short_crossfade", "long_crossfade", "eq_swap", "bass_swap", "highs_swap", "instrumental_swap"],
-    "major": ["filter_fade", "highpass_sweep_in", "band_filter_sweep", "frequency_blend", "stem_swap", "mashup", "echo_out", "reverb_wash", "pitch_bend", "drum_break", "kickless_swap", "drum_replace", "bpm_warp", "key_shift_bridge", "harmonic_overlay", "spectral_hold", "neural_bridge"],
-    "drop": ["build_riser_drop", "silence_drop", "snare_buildup", "breakdown_to_drop", "acapella_drop", "riser_overlay", "impact_overlay"],
-    "cut": ["cut", "punch_in", "spinback", "forward_spin", "tape_stop"],
-    "loop": ["loop_tighten", "loop_callback", "loop_roll", "beat_juggle", "chop", "scratch_fill"]
+    "minor": [
+      "crossfade",
+      "short_crossfade",
+      "long_crossfade",
+      "eq_swap",
+      "bass_swap",
+      "highs_swap",
+      "instrumental_swap"
+    ],
+    "major": [
+      "filter_fade",
+      "highpass_sweep_in",
+      "band_filter_sweep",
+      "frequency_blend",
+      "stem_swap",
+      "mashup",
+      "echo_out",
+      "reverb_wash",
+      "pitch_bend",
+      "drum_break",
+      "kickless_swap",
+      "drum_replace",
+      "bpm_warp",
+      "key_shift_bridge",
+      "harmonic_overlay",
+      "spectral_hold",
+      "neural_bridge"
+    ],
+    "drop": [
+      "build_riser_drop",
+      "silence_drop",
+      "snare_buildup",
+      "breakdown_to_drop",
+      "acapella_drop",
+      "riser_overlay",
+      "impact_overlay"
+    ],
+    "cut": [
+      "cut",
+      "punch_in",
+      "spinback",
+      "forward_spin",
+      "tape_stop"
+    ],
+    "loop": [
+      "loop_tighten",
+      "loop_callback",
+      "loop_roll",
+      "beat_juggle",
+      "chop",
+      "scratch_fill"
+    ]
   },
-
   "category_summary": {
     "fade": "amplitude-only handoff",
     "eq": "frequency-band swap",

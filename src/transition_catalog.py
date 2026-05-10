@@ -104,6 +104,62 @@ def blocked_for_section(section_label: str) -> list[str]:
     ]
 
 
+def vocal_safe_techniques(tier: str | None = None,
+                           status: str | None = "implemented") -> list[dict]:
+    """Techniques safe to apply on vocal-active sections.
+
+    Filters out aggressive techniques that mangle vocals (chop, tape_stop,
+    drum_replace, build_riser_drop, etc — anything with vocal_safe=False
+    in catalog.json).
+    """
+    return [
+        t for t in list_techniques(tier=tier, status=status)
+        if t.get("vocal_safe") is True
+    ]
+
+
+def vocal_unsafe_names() -> set[str]:
+    """Names of techniques flagged vocal_safe=False. Use as a filter set."""
+    return {t["name"] for t in all_techniques()
+            if t.get("vocal_safe") is False}
+
+
+def technique_for_context(tier: str,
+                           section_label: str | None = None,
+                           vocal_active: bool = False,
+                           status: str | None = "implemented"
+                           ) -> list[dict]:
+    """Return techniques for a junction context: tier + section + vocal flag.
+
+    Composes:
+      - tier filter (must match)
+      - section compatibility (best_for / incompatible_with)
+      - vocal_safe filter (when vocal_active=True)
+      - implementation_status filter
+
+    Returned list is ordered by best_for-match priority (best_for hit first,
+    then neutral, then anything not explicitly incompatible).
+    """
+    pool = list_techniques(tier=tier, status=status)
+    if vocal_active:
+        pool = [t for t in pool if t.get("vocal_safe") is True]
+    if not section_label:
+        return pool
+    label = section_label.lower()
+    matched = []
+    neutral = []
+    for t in pool:
+        incompat = [s.lower() for s in (t.get("incompatible_with") or [])]
+        if label in incompat:
+            continue
+        best = [s.lower() for s in (t.get("best_for") or [])]
+        if label in best:
+            matched.append(t)
+        else:
+            neutral.append(t)
+    return matched + neutral
+
+
 def techniques_by_tier() -> dict[str, list[str]]:
     """Pre-aggregated tier → [name, ...] map from catalog summary."""
     return dict(_load().get("tier_summary") or {})

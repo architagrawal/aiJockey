@@ -59,10 +59,58 @@ LOOP_TECHNIQUES: list[dict[str, Any]] = [
 ALLOWED_TIERS = frozenset({"minor", "major", "drop", "cut", "loop"})
 
 
-def tier_to_technique(tier: str, junction_idx: int) -> dict[str, Any]:
+def tier_to_technique(tier: str, junction_idx: int,
+                      vocal_active: bool = False,
+                      section_label: str | None = None) -> dict[str, Any]:
+    """Pick a technique for a tier + junction context.
+
+    When `vocal_active=True` (vocal_activity > 0.30 on EITHER junction
+    side), filters out vocal-unsafe techniques per catalog.json
+    `vocal_safe=False` — chop, tape_stop, drum_replace, kickless_swap,
+    spinback, forward_spin, build_riser_drop, snare_buildup, etc.
+
+    When `section_label` provided (e.g. 'chorus', 'break', 'bridge'),
+    additionally filters by catalog `incompatible_with` rules.
+
+    Falls through to legacy hardcoded pools when catalog unavailable
+    or the filtered set is empty for this context.
+    """
     t = (tier or "minor").lower().strip()
     if t not in ALLOWED_TIERS:
         t = "minor"
+
+    # Catalog-driven path (preferred when catalog reachable + filters fire).
+    try:
+        from transition_catalog import technique_for_context, get as cat_get
+        ctx_pool = technique_for_context(
+            tier=t,
+            section_label=section_label,
+            vocal_active=vocal_active,
+            status="implemented",
+        )
+        if ctx_pool:
+            chosen = ctx_pool[junction_idx % len(ctx_pool)]
+            base: dict[str, Any] = {"name": chosen["name"], "tier": t}
+            # Carry typical_bars[0] as default bars hint (downstream may override)
+            tb = chosen.get("typical_bars") or [16]
+            try:
+                base["bars"] = int(tb[0]) if tb else 16
+            except Exception:
+                base["bars"] = 16
+            # Pull a couple of common params from the catalog as sane defaults
+            params = chosen.get("params") or {}
+            for k, default in (("delay_beats", 0.5), ("feedback", 0.55),
+                                ("silence_beats", 2)):
+                if k in params and k not in base:
+                    base[k] = default
+            base["catalog_picked"] = True
+            base["vocal_safe"] = bool(chosen.get("vocal_safe"))
+            return base
+    except Exception:
+        # Catalog import error or other — fall through to legacy.
+        pass
+
+    # Legacy hardcoded pool (back-compat).
     pool = {
         "minor": MINOR_TECHNIQUES,
         "major": MAJOR_TECHNIQUES,
@@ -71,9 +119,6 @@ def tier_to_technique(tier: str, junction_idx: int) -> dict[str, Any]:
         "loop": LOOP_TECHNIQUES,
     }[t]
     base = dict(pool[junction_idx % len(pool)])
-    # Propagate tier into the technique dict so downstream
-    # (constitutional validator, debug logs, RAG features) can see
-    # what the LLM intended, not just the resolved DSP name.
     base["tier"] = t
     return base
 
@@ -81,7 +126,12 @@ def tier_to_technique(tier: str, junction_idx: int) -> dict[str, Any]:
 ALLOWLIST_NAMES = frozenset(
     {"cut", "fade_in", "crossfade", "eq_swap", "filter_fade", "silence_drop",
      "drum_break", "mashup", "stem_swap", "echo_out", "spinback",
-     "pitch_bend", "loop_tighten", "scratch_fill", "loop_callback"}
+     "pitch_bend", "loop_tighten", "scratch_fill", "loop_callback",
+     # Tier-1 catalog upgrades (post-a00b5cd)
+     "bass_swap", "highs_swap", "highpass_sweep_in", "punch_in", "chop",
+     "loop_roll", "beat_juggle", "acapella_drop", "instrumental_swap",
+     "kickless_swap", "drum_replace", "reverb_wash", "forward_spin",
+     "tape_stop", "spectral_hold", "bpm_warp", "harmonic_overlay"}
 )
 
 
