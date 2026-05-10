@@ -368,7 +368,19 @@ def call_backend(files, sample_picks, preset_label, duration, use_library,
                 f"Try shorter mix length or fewer clips.",
                 None, [], None)
     if r.status_code == 401:
-        return None, "**Auth failed** — backend key mismatch.", None, [], None
+        try:
+            detail = r.json().get("detail", "")
+        except Exception:
+            detail = ""
+        return (None,
+                f"🔒 **Sign-in required.** {detail}".strip(),
+                None, [], None)
+    if r.status_code == 429:
+        try:
+            detail = r.json().get("detail", "Daily limit reached.")
+        except Exception:
+            detail = "Daily limit reached."
+        return None, f"⏳ **{detail}**", None, [], None
     if r.status_code == 400:
         try:
             detail = r.json().get("detail", r.text[:300])
@@ -510,7 +522,8 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
         with gr.Row():
             login_btn = gr.LoginButton(value="Sign in with Hugging Face",
                                         size="sm")
-            who_md = gr.Markdown("_anonymous · sign in for queue fairness_")
+            who_md = gr.Markdown(
+                "**Sign-in required** — 1 free render per user per day.")
         with gr.Row():
             status_md = gr.Markdown(backend_status_md())
         # Auto-refresh status every 10 seconds (gradio 5 Timer).
@@ -520,7 +533,14 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
         except Exception:
             pass
 
-        with gr.Row(variant="panel"):
+        # Render panel — hidden until OAuth login completes.
+        signin_notice = gr.Markdown(
+            "🔒 **Sign in with Hugging Face above to access the render form.** "
+            "Each user gets 1 free render per 24 hours.",
+            visible=True)
+
+        with gr.Group(visible=False) as render_panel:
+          with gr.Row(variant="panel"):
             # Left column: controls
             with gr.Column(scale=2, min_width=320):
                 gr.Markdown("### 1 · Clips")
@@ -640,13 +660,33 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
             [sample_picks, preset, duration, use_library, mix_mode,
              mode_choice, vocals_choice, advanced_on, custom_arc])
 
-        # Sign-in surfacing: show "signed in as X" when user has logged in.
-        # gradio auto-injects gr.OAuthProfile when fn signature requests it.
+        # Sign-in surfacing + form gating + quota check.
         def show_who(profile: gr.OAuthProfile | None):
             if profile is None:
-                return "_anonymous · sign in for queue fairness_"
-            return f"signed in as **{profile.username}**"
-        app.load(show_who, None, who_md)
+                return ("**Sign in required** — 1 free render / user / day.",
+                        gr.update(visible=True),   # signin_notice
+                        gr.update(visible=False))  # render_panel
+            # Quota pre-check
+            quota_msg = ""
+            try:
+                qr = requests.get(f"{MI300X_URL}/quota",
+                                  headers={"X-Key": MI300X_KEY,
+                                           "X-User-Id": profile.username},
+                                  timeout=5)
+                if qr.ok:
+                    q = qr.json()
+                    if not q.get("allowed"):
+                        secs = q.get("retry_after_sec", 0)
+                        h = int(secs / 3600)
+                        m = int((secs % 3600) / 60)
+                        quota_msg = (f"  ·  ⚠ daily limit used — try again "
+                                     f"in {h}h{m}m")
+            except Exception:
+                pass
+            return (f"signed in as **{profile.username}**{quota_msg}",
+                    gr.update(visible=False),  # signin_notice hidden
+                    gr.update(visible=True))   # render_panel shown
+        app.load(show_who, None, [who_md, signin_notice, render_panel])
 
     with gr.Tab("How it works"):
         gr.Markdown("""

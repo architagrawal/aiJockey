@@ -65,6 +65,60 @@ _inflight_count = 0
 _inflight_count_lock = threading.Lock()
 _concurrent_denied = 0
 
+# Per-user daily rate limit (1 render / 24h / signed-in user by default).
+# Persisted to disk so droplet restart preserves quota state.
+RATE_LIMIT_WINDOW_SEC = int(os.environ.get("AIJOCKEY_RATE_LIMIT_SEC", "86400"))
+RATE_LIMIT_FILE = Path(os.environ.get(
+    "AIJOCKEY_RATE_LIMIT_FILE", "/workspace/logs/rate_limits.json"))
+RATE_LIMIT_OWNER_BYPASS = set(
+    s.strip() for s in os.environ.get(
+        "AIJOCKEY_RATE_LIMIT_BYPASS_USERS", "").split(",") if s.strip())
+_rate_limits: dict[str, float] = {}
+_rate_lock = threading.Lock()
+
+
+def _load_rate_limits() -> None:
+    global _rate_limits
+    try:
+        if RATE_LIMIT_FILE.exists():
+            _rate_limits = json.loads(RATE_LIMIT_FILE.read_text() or "{}")
+    except Exception:
+        _rate_limits = {}
+
+
+def _save_rate_limits() -> None:
+    try:
+        RATE_LIMIT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with _rate_lock:
+            payload = json.dumps(_rate_limits)
+        RATE_LIMIT_FILE.write_text(payload)
+    except Exception:
+        pass
+
+
+def _rate_limit_status(user_id: str) -> tuple[bool, float]:
+    """Return (allowed, retry_after_sec) for user."""
+    if user_id in RATE_LIMIT_OWNER_BYPASS:
+        return True, 0.0
+    now = time.time()
+    with _rate_lock:
+        last = _rate_limits.get(user_id, 0.0)
+    elapsed = now - last
+    if elapsed < RATE_LIMIT_WINDOW_SEC:
+        return False, RATE_LIMIT_WINDOW_SEC - elapsed
+    return True, 0.0
+
+
+def _rate_limit_mark(user_id: str) -> None:
+    if not user_id or user_id in RATE_LIMIT_OWNER_BYPASS:
+        return
+    with _rate_lock:
+        _rate_limits[user_id] = time.time()
+    _save_rate_limits()
+
+
+_load_rate_limits()
+
 
 def _inflight_inc() -> None:
     global _inflight_count
@@ -663,6 +717,10 @@ def health():
         "inflight_count": _inflight_count,
         "inflight_max": INFLIGHT_MAX,
         "gpu_busy": _gpu_lock.locked(),
+        "rate_limit_window_sec": RATE_LIMIT_WINDOW_SEC,
+        "users_rate_limited_now": sum(
+            1 for ts in _rate_limits.values()
+            if time.time() - ts < RATE_LIMIT_WINDOW_SEC),
     }
 
 
@@ -717,6 +775,26 @@ def list_sample_clips():
                         "duration_sec": round(dur, 1),
                         "origin": origin})
     return {"clips": out, "dirs": [str(d) for d, _ in SAMPLE_CLIPS_DIRS]}
+
+
+@app.get("/quota")
+def quota(x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+          x_key: str | None = Header(default=None, alias="X-Key")):
+    """Frontend pre-check: tells Space whether user can render now."""
+    check_key(x_key)
+    uid = (x_user_id or "").strip()
+    if not uid or uid.lower() in ("anon", "anonymous"):
+        return {"signed_in": False, "allowed": False,
+                "reason": "sign-in required"}
+    allowed, retry = _rate_limit_status(uid)
+    return {
+        "signed_in": True,
+        "user_id": uid,
+        "allowed": allowed,
+        "retry_after_sec": round(retry, 1),
+        "window_sec": RATE_LIMIT_WINDOW_SEC,
+        "owner_bypass": uid in RATE_LIMIT_OWNER_BYPASS,
+    }
 
 
 @app.get("/preset_schema")
@@ -1210,10 +1288,28 @@ async def generate(
     advanced_json: str | None = Form(None),
     sample_clip_ids: str | None = Form(None),
     x_key: str | None = Header(default=None, alias="X-Key"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ):
     global _concurrent_denied
     check_key(x_key)
     touch_idle()
+
+    # Auth: require signed-in user. Space sends X-User-Id when oauth_profile
+    # populated. Empty / "anon" → reject.
+    uid = (x_user_id or "").strip()
+    if not uid or uid.lower() in ("anon", "anonymous"):
+        raise HTTPException(401,
+            detail="sign-in required: please log in with Hugging Face")
+    # Daily rate limit (1 render / window) per signed-in user.
+    allowed, retry_after = _rate_limit_status(uid)
+    if not allowed:
+        hrs = int(retry_after / 3600)
+        mins = int((retry_after % 3600) / 60)
+        raise HTTPException(
+            429,
+            detail=f"daily render limit reached for user {uid!r}. "
+                   f"Try again in {hrs}h{mins}m.",
+            headers={"Retry-After": str(int(retry_after))})
 
     ef = export_format.lower().strip()
     if ef not in (EXPORT_MP3, EXPORT_WAV, EXPORT_FLAC):
@@ -1572,7 +1668,10 @@ async def generate(
         resp = FileResponse(str(artifact), media_type=mt, filename=fname, headers=headers)
         # Optional second file: timeline only via separate endpoint suggestion — keep simple.
         touch_idle()
-        jlog(job_id, "response", (time.perf_counter() - t_wall) * 1000)
+        # Mark daily quota only on successful render (not on 503/504/error).
+        _rate_limit_mark(uid)
+        jlog(job_id, "response", (time.perf_counter() - t_wall) * 1000,
+             user=uid)
         return resp
     finally:
         _inflight_dec()
