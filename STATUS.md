@@ -1,11 +1,106 @@
 # AiJockey — Status, Progress, Plan, Bugs
 
 Snapshot of what works, what's broken, what's next.
-Last updated: 2026-05-09 (post review + perf + ROCm pass on `best-output-pipeline`).
+Last updated: 2026-05-09 (post live MI300X smoke + render-path stabilization on `best-output-pipeline`).
 
 ---
 
-## Session update — code review + perf + ROCm hardening (2026-05-09)
+## Session update — render path stabilization + pool intelligence + mix_mode UX (2026-05-09 evening)
+
+Branch `best-output-pipeline` taken from "scaffolded but broken on real clips" → "ships intelligible mixes from arbitrary user clips on MI300X". 9 critical render bugs fixed (overlap math, tier propagation, segment min-length, htdemucs_ft compile crash). Director wiring now accepts pool inventory + emits set narrative + per-junction intent. Library augmentation gets semantic mix_mode UX with CLAP-similarity picks.
+
+### MI300X bring-up — done
+
+- Snapshot `aijockey-slim` (109.7 GB atl1) pulled into a fresh AMD Developer Cloud MI300X 1× ($1.99/hr).
+- Container env: `rocm:latest` with PyTorch 2.9 nightly + ROCm 7.0, /workspace bound to /root/aijockey, /cache (snapshot's 6.2 GB analyzed pool of 103 clips) bound in.
+- Deps installed: `lion-pytorch peft trl datasets accelerate laion-clap pyrubberband demucs h5py torchlibrosa ftfy starlette anyio pydantic fastapi<0.115`.
+- Stock `flash-attn` not built (ROCm — opt-in via CK fork only). `bitsandbytes` not installed (vanilla CUDA-only; bnb-rocm fork required for QLoRA/INT8).
+- 14/14 unit tests pass on GPU.
+- 10+ smoke renders proven end-to-end (analyze → plan → execute → master).
+
+### Render path bugs fixed (live-discovered + repaired)
+
+| Commit | Bug | Fix |
+|--------|-----|-----|
+| `5b4f9cd` | `tier_to_technique` discarded `tier` field → constitutional couldn't see `drop` tier | propagate tier into returned technique dict |
+| `5b4f9cd` | Planner `pick_segment` last-resort returned 0.5–2 s segments → consumed entirely by overlap | `enforce_min_segment_length()` extends short segments to N bars via downbeats |
+| `759aca7` → `9b74485` | Overlap math shadowed: `apply_transition` clamped `overlap_n` for vocal mute but `crossfade_transition`/`eq_swap_transition` recomputed overlap from raw `bars` arg → consumed full segment | shadow `bars = overlap_n // bar_samples` so primitives receive clamped value |
+| `0c844ef` | Half-segment overlap still consumed too much → output stuck at longest-segment length | clamp = min(shorter_side / 3, 8 bars) |
+| `6c4ba97` | min_bars=16 over-extended segments planner had legitimately picked short → 238 s for 120 s target | min_bars=8, only patch truly tiny |
+| `7c486cb`, `be9a128` | `estimate_max_transitions_for_pool` returned 64 for 103-clip pool → LLM context overflow → fallback fired | cap at 16, formula `max(8, duration/20)` |
+| `4b592ad` | Tokenizer `max_length=2048` truncated chat-template tail with pool inventory injected → LM continued user text instead of answering | bump to 8192 |
+| `aeb75ac` | `htdemucs_ft` (BagOfModels) crashes after `torch.compile` — wrapper hides `.segment` attr → `apply_model` raises `AttributeError` | skip `maybe_compile` for `BagOfModels`; bf16 autocast still applies |
+| `f68b62b` | Default `Qwen3-8B-Instruct` returned `RepositoryNotFoundError` (model does not exist on HF) | revert to `Qwen2.5-7B-Instruct`; document real Qwen3 IDs (`Qwen3-4B-Instruct-2507`, `Qwen3-235B-A22B-Instruct-2507`) |
+
+After all fixes: render duration matches plan ±10 %, Director runs without fallback, audio output not abrupt within constraints of pool coherence.
+
+### Pool intelligence + Director narrative (`a71876b`)
+
+`src/pool_intelligence.py` (new, ~200 lines):
+
+- `tag_clip(meta)` — per-clip dict {clip_id, source, genre, bpm, bpm_band, key, section_top, energy, duration, has_vocals}
+- `cluster_pool()` — group by (genre, bpm_band)
+- `coherence_score()` — mean cosine sim of CLAP embeddings to pool centroid (0..1)
+- `summary_table()` — markdown table of pool with USER/LIB column for Director consumption
+- `diagnose()` — verdict (`tight` / `mixed_navigable` / `disparate`) + narrative_advice + bpm_spread + cluster summary
+- `pick_coherent_subset()` — auto-curate when pool too wide (deferred wiring)
+
+Director (`src/director.py`):
+
+- `SYSTEM_PROMPT_PHASE1` rewritten — workflow demands `set_narrative`, per-junction `transition_intents`, honest `narrative_notes` when pool disparate. 7 intent categories: `breath` / `build_tension` / `drop_payoff` / `genre_jump` / `callback` / `smooth_continue` / `cooldown`. 3 reasoning examples.
+- `run_director(clips_meta=...)` injects pool inventory + diagnose() output into LLM prompt. Director reasons about what pool actually contains.
+- `_sanitize_out` validates set_narrative + transition_intents (defaults inferred per tier when LLM omits).
+- `_fallback_director` also produces narrative + intents for deterministic path.
+- Per-junction accent cap (≤2 in Phase 1) at sanitize time.
+- Style-RAG few-shot block prepended when `/scratch/embed/` index populated.
+
+Planner (`src/planner.py`):
+
+- `apply_llm_transition_tiers_to_timeline(transition_intents=...)` propagates intent into `transition_in['intent']`.
+- Constitutional-violation penalty in `plan_n_best` (rejects subtract 0.5 from candidate score).
+- Planner-stage phrase quantize (defense in depth above execute-stage).
+
+`src/main.py` saves `card.json` next to rendered mix with: set_narrative, narrative_notes, arc, pool diagnostic, per-junction (tier, intent) plan.
+
+### mix_mode + library augmentation (`bd30458`)
+
+UX evolution: replace raw `library_ratio` knob with semantic mode.
+
+- `/generate` form fields: `mix_mode` (`tight` / `balanced` (default) / `exploratory`) + `library_role` (optional advanced: `any` / `fill_gaps` / `warmup_outro` / `bridges_only`).
+- `tight` forces `use_library=False` regardless of toggle.
+- `lib_count_for_mode(mode, user_count, user_total_dur, target_duration)` — sweet spot moves with all four. balanced caps at LIBRARY_MAX_PICK//2, exploratory at LIBRARY_MAX_PICK.
+- `_user_pool_centroid()` + `library_clip_paths_clap()` — CLAP-cosine retrieval against library cache, BPM ±15 % filter. Replaces alphabetical `library_clip_paths()` when CLAP cache available; alphabetical fallback when not.
+- User clips tagged `source='user'` in their analyzed cache JSON; library clips tagged `source='library'` on link (rewrites symlink to concrete file before edit).
+- Constitutional new rule `check_user_clip_floor` — warns if any source=='user' clip missing from timeline (severity warn, planner re-pick rather than reject).
+- Director system prompt has USER-VS-LIB POLICY section: every USER clip MUST appear at least once; LIB supports as bridges/warmup/cooldown.
+- Response headers: `X-Job-Id`, `X-Mix-Mode`, `X-Clips-Used` (`{user_count, library_count, library_ids[]}`), optional `X-Ingest-Warnings`.
+- jlog `library_pick` event with mode/role/user-count/lib-count for observability.
+
+### Smoke quality progression (test1.wav + test2.wav user pool)
+
+| Run | Render | Director | Verdict |
+|-----|--------|----------|---------|
+| smoke.wav | 35.7 s / 90 s target | off | render duration shortfall — bars consumption bug |
+| smoke_d10.wav | 160 s / 120 s target | Qwen2.5-7B | post overlap fix |
+| smoke_long.wav | 279 s / 360 s target | Qwen2.5-7B | longer narrative space, all-minor (overcautious on disparate library pool) |
+| test_3min_v2.wav | 136 s / 180 s target | **fallback** (Qwen3-8B 401) | DSP good, no narrative |
+| **test_3min_v3.wav** | **136 s / 180 s target** | **Qwen2.5-7B (working)** | narrative: "navigate disparate pool as a curated journey rather than forcing build", per-junction intents present, htdemucs_ft + stem-swap + phrase-quantize all active |
+
+### Self-critique loop — designed, not built
+
+Discussed 1.5-pass design (audio critic → rule-based improver → surgical re-render). Decision: defer to post-Beat-This! since most issues a critic would catch are upstream artifacts (downbeat heuristic). Build order:
+
+1. **Beat-This!** — fixes phrase-grid drift (downbeat heuristic currently `beats[::4]`); ~30 % of post-render issues vanish
+2. Cheap audio probes (RMS env, xcorr, spectro diff) — numpy-only, catches 70 % of artifacts at 1 % cost of LLM critic
+3. Wire CriticV2 (S4 trained) into `/generate` as global score gate
+4. Rule-based improver: 3-5 issue types → deterministic timeline edits
+5. Audio-LLM critic (Qwen2-Audio JSON output) as **fallback**, not primary; opt-in flag
+6. Surgical re-render with cascade (segment + 2 transitions)
+7. Skip 2nd critique pass
+
+---
+
+## Session update — code review + perf + ROCm hardening (2026-05-09 morning)
 
 Branch `best-output-pipeline` reviewed end-to-end. 9 correctness bugs, 6 ROCm compat issues, 9 perf wins, audio-Director wiring, and 2 model swaps applied. All syntax-clean. Render path independent of training pipeline — usable on user clips without library/self-play.
 
