@@ -14,7 +14,22 @@ import os
 import re
 from typing import Any
 
-ALLOWED_TRANSITION_TIERS = frozenset({"minor", "major", "drop", "cut", "loop"})
+ALLOWED_TRANSITION_TIERS_FULL = frozenset({"minor", "major", "drop", "cut", "loop"})
+PHASE1_ALLOWED_TIERS = frozenset({"minor", "major", "drop"})
+
+
+def _allowed_tiers() -> frozenset[str]:
+    """Phase 1 (default) restricts to minor/major/drop. cut+loop need
+    material-aware gating (instrumental-only, phrase-aligned) — Phase 2.
+    Set AIJOCKEY_PHASE=2 to enable full vocab.
+    """
+    if os.environ.get("AIJOCKEY_PHASE", "1") == "1":
+        return PHASE1_ALLOWED_TIERS
+    return ALLOWED_TRANSITION_TIERS_FULL
+
+
+# Back-compat alias used elsewhere in the module + tests.
+ALLOWED_TRANSITION_TIERS = ALLOWED_TRANSITION_TIERS_FULL
 ALLOWED_ARCS = (
     "build", "peak", "rollercoaster", "descend", "flat_high", "flat_low", "custom"
 )
@@ -141,13 +156,17 @@ def _sanitize_out(raw: dict[str, Any], arc_fallback: str, user_prompt: str,
             callback_budget = 1
     callback_budget = max(0, min(5, callback_budget))
 
+    allowed = _allowed_tiers()
     tiers_in = raw.get("transition_tiers")
     tiers: list[str] = []
     if isinstance(tiers_in, list):
         for x in tiers_in:
             tx = str(x).lower().strip()
-            if tx in ALLOWED_TRANSITION_TIERS:
+            if tx in allowed:
                 tiers.append(tx)
+            elif tx in ALLOWED_TRANSITION_TIERS_FULL:
+                # tier valid but disabled in current phase -> downgrade to major
+                tiers.append("major")
             else:
                 tiers.append("minor")
     while len(tiers) < max_transitions:

@@ -516,6 +516,24 @@ def execute(timeline_path: str, cache_dir: str, out_path: str,
                     if a != (e['segment'].get('start'), e['segment'].get('end')))
         print(f"phrase-quantize: snapped {moved}/{len(tl)} segment boundaries")
 
+    # Constitutional validation. Hard musical-rule layer above LLM choices.
+    # Set AIJOCKEY_CONSTITUTIONAL=0 to disable.
+    if os.getenv('AIJOCKEY_CONSTITUTIONAL', '1') != '0':
+        try:
+            import constitutional as C
+            violations = C.validate(tl, clips_meta)
+            if violations:
+                rejects = [v for v in violations if v.severity == 'reject']
+                warns = [v for v in violations if v.severity != 'reject']
+                print(f"constitutional: {len(rejects)} rejects, {len(warns)} warns")
+                for v in rejects:
+                    print(f"  REJECT j{v.junction_index} {v.rule}: {v.detail}")
+                for v in warns:
+                    print(f"  warn j{v.junction_index} {v.rule}: {v.detail}")
+                C.repair(tl, violations)
+        except ImportError:
+            pass
+
     sample_bank = SampleBank(samples_dir)
     print(f"sample bank: real types={list(sample_bank.bank.keys())}, "
           f"synth types={list(sample_bank.list_available_types())}")
