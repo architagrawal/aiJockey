@@ -264,6 +264,47 @@ def _apply_restricted_filter(tech: dict) -> dict:
 # Segment selection
 # ---------------------------------------------------------------------------
 
+# Section label synonyms — Director / dataset use varied vocab; collapse
+# to canonical buckets so prefer="drop" matches "chorus"/"hook"/"peak".
+_SECTION_SYNONYMS = {
+    'peak':      {'drop', 'chorus', 'hook', 'big', 'climax', 'peak'},
+    'drop':      {'drop', 'chorus', 'hook', 'big', 'climax', 'peak'},
+    'chorus':    {'drop', 'chorus', 'hook', 'big', 'climax', 'peak'},
+    'intro':     {'intro', 'build', 'opener', 'start', 'buildup'},
+    'build':     {'intro', 'build', 'opener', 'buildup'},
+    'break':     {'break', 'breakdown', 'bridge', 'quiet', 'interlude'},
+    'breakdown': {'break', 'breakdown', 'bridge', 'quiet', 'interlude'},
+    'bridge':    {'break', 'breakdown', 'bridge', 'interlude'},
+    'verse':     {'verse', 'pre-chorus', 'prechorus'},
+    'outro':     {'outro', 'ending', 'fade', 'tail'},
+}
+
+
+def _section_matches(sec_type: str | None, prefer: str | None) -> bool:
+    """Synonym-aware section match. Falls back to direct equality."""
+    if not prefer:
+        return False
+    st = (sec_type or '').lower()
+    pref = prefer.lower()
+    syns = _SECTION_SYNONYMS.get(pref, {pref})
+    return st in syns or st == pref
+
+
+def _snap_to_downbeat(t: float, downbeats: list[float], tol_sec: float = 0.6) -> float:
+    """Snap timestamp to nearest downbeat within tolerance.
+    Returns original `t` when no downbeat within tol or list empty.
+    Uses Beat-This! `downbeats` field already cached per clip."""
+    if not downbeats:
+        return t
+    try:
+        nearest = min(downbeats, key=lambda d: abs(float(d) - t))
+        if abs(float(nearest) - t) <= tol_sec:
+            return float(nearest)
+    except Exception:
+        pass
+    return t
+
+
 def pick_segment(clip: dict, prefer: str | None = None,
                  target_energy: float | None = None,
                  exclude_indices: set | None = None,
@@ -273,13 +314,19 @@ def pick_segment(clip: dict, prefer: str | None = None,
                  target_bpm: float | None = None,
                  target_key: str | None = None,
                  transition_type: str | None = None,
+                 next_transition_aggressive: bool = False,
+                 phrase_snap: bool = True,
                  ) -> tuple[dict, int]:
     """
     Returns (segment_dict, segment_index). Filters sections shorter than
-    min_seconds. Falls back to longest available if all too short.
+    min_seconds (tiered: prefer >= min, accept >= 0.6*min with penalty).
+    Falls back to longest available if all too short.
 
-    prefer_instrumental: when set, deprioritize vocal-active sections
-    (uses cached vocal_activity field if present, else section.type heuristic).
+    prefer_instrumental: deprioritize vocal-active sections (transition boundaries).
+    next_transition_aggressive: penalize high-VA sections to pre-empt vocal_guard
+                                clamp (avoid wasting an aggressive transition pick).
+    phrase_snap: snap returned segment.start/end to nearest downbeat
+                 (uses clip['downbeats']). Kills sub-bar jitter.
 
     Tier-1 follow-up H: when AIJOCKEY_CANDIDATE_PICKER=1 AND clip has
     All-In-One section labels (chorus/verse/break/...), score 3-5
@@ -289,8 +336,9 @@ def pick_segment(clip: dict, prefer: str | None = None,
     """
     sections = clip.get('sections', [])
     if not sections:
-        return ({'start': 0.0, 'end': clip.get('duration', 30.0),
-                 'type': 'unknown', 'energy': 0.5}, -1)
+        seg = {'start': 0.0, 'end': clip.get('duration', 30.0),
+               'type': 'unknown', 'energy': 0.5}
+        return (seg, -1)
     # Candidate-scored picker (Tier-1 H). Only fires when env enabled AND
     # sections carry functional labels (i.e. came from All-In-One, not
     # MFCC clustering). Returns None silently → legacy logic below runs.
@@ -300,14 +348,12 @@ def pick_segment(clip: dict, prefer: str | None = None,
             build_candidates as _picker_build,
             pick_best_junction as _picker_pick,
         )
-        # Trigger only when at least one section carries a functional label.
         if _picker_enabled() and any(
             'label' in s and s.get('source') == 'all_in_one' for s in sections
         ):
             cands = _picker_build(clip, sections,
                                    min_seconds=min_seconds,
                                    max_seconds=60.0)
-            # Maintain exclude_indices contract — drop already-picked starts.
             if exclude_indices:
                 cands = [c for i, c in enumerate(cands)
                          if i not in exclude_indices]
@@ -320,7 +366,6 @@ def pick_segment(clip: dict, prefer: str | None = None,
                     transition_type=transition_type or '',
                 )
                 if best is not None:
-                    # Find original section index for exclude tracking
                     for i, s in enumerate(sections):
                         if (abs(float(s.get('start', 0)) - best['start']) < 0.5
                                 and s.get('label') == best['label']):
@@ -335,42 +380,69 @@ def pick_segment(clip: dict, prefer: str | None = None,
                             if 'vocal_activity' in s:
                                 seg['vocal_activity'] = s['vocal_activity']
                             return (seg, i)
-    except Exception as _e:
-        # Picker import / shape issue — fall through silently to legacy.
+    except Exception:
         pass
     exclude = exclude_indices or set()
-    # Filter sections by min duration
+    # Tiered min duration: prefer long sections, accept moderately-short with
+    # later penalty. Keeps good 18-25s breakdowns from being lost to fallback.
+    accept_floor = 0.6 * min_seconds
     long_enough = [(i, s) for i, s in enumerate(sections)
                    if (s['end'] - s['start']) >= min_seconds]
-    available = [(i, s) for i, s in long_enough if i not in exclude]
+    medium = [(i, s) for i, s in enumerate(sections)
+              if accept_floor <= (s['end'] - s['start']) < min_seconds]
+    candidates_pool = long_enough or medium or list(enumerate(sections))
+    available = [(i, s) for i, s in candidates_pool if i not in exclude]
     if not available:
-        # No long enough remaining — fall back to longest section regardless
-        if long_enough:
-            available = long_enough
-        else:
-            available = list(enumerate(sections))  # last resort, allow short
-    # Vocal-aware filtering for transition boundaries
+        available = candidates_pool
+
     if prefer_instrumental:
         def _is_instrumental(sec):
             va = sec.get('vocal_activity')
             if va is not None:
                 return float(va) < 0.20
-            # heuristic from section type when vocal_activity unavailable
             return sec.get('type') in ('intro', 'breakdown', 'outro', 'drop')
         instrumental = [(i, s) for i, s in available if _is_instrumental(s)]
         if instrumental:
             available = instrumental
+
+    if next_transition_aggressive:
+        # Prefer sections with vocal_activity < 0.30 — vocal_guard would
+        # otherwise clamp the aggressive transition to crossfade. Keep
+        # full pool when no low-VA sections (caller will get clamped).
+        low_va = [(i, s) for i, s in available
+                  if (s.get('vocal_activity') is None
+                      or float(s.get('vocal_activity', 0)) < 0.30)]
+        if low_va:
+            available = low_va
+
+    chosen: tuple[dict, int] | None = None
     if prefer:
         for i, s in available:
-            if s.get('type') == prefer:
-                return (dict(s), i)
-    if target_energy is not None:
-        i, s = min(available, key=lambda kv: abs(kv[1].get('energy', 0.5) - target_energy))
-        return (dict(s), i)
-    body = [(i, s) for i, s in available if s.get('type') in ('drop', 'verse', 'breakdown')]
-    pool = body or available
-    i, s = max(pool, key=lambda kv: kv[1]['end'] - kv[1]['start'])
-    return (dict(s), i)
+            if _section_matches(s.get('type'), prefer):
+                chosen = (dict(s), i)
+                break
+    if chosen is None and target_energy is not None:
+        i, s = min(available,
+                   key=lambda kv: abs(kv[1].get('energy', 0.5) - target_energy))
+        chosen = (dict(s), i)
+    if chosen is None:
+        body = [(i, s) for i, s in available
+                if s.get('type') in ('drop', 'verse', 'breakdown')]
+        pool = body or available
+        i, s = max(pool, key=lambda kv: kv[1]['end'] - kv[1]['start'])
+        chosen = (dict(s), i)
+
+    seg, idx = chosen
+    if phrase_snap:
+        downs = clip.get('downbeats') or []
+        if downs:
+            new_start = _snap_to_downbeat(float(seg['start']), downs)
+            new_end = _snap_to_downbeat(float(seg['end']), downs)
+            # Guard: snapped segment must remain >= half of original
+            if new_end - new_start >= 0.5 * (seg['end'] - seg['start']):
+                seg['start'] = new_start
+                seg['end'] = new_end
+    return (seg, idx)
 
 
 # ---------------------------------------------------------------------------
