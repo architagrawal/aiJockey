@@ -257,6 +257,29 @@ def _user_pool_centroid(saved_paths: list[Path], cache_dir: Path
     return np.mean(np.stack(arrs), axis=0)
 
 
+def _bpm_compat(lib_bpm: float, user_bpm_mean: float, bpm_tol_pct: float) -> bool:
+    """Octave-aware BPM compatibility check.
+
+    Per dj_research.md, open-format DJs jump BPMs regularly (echo_out / cut
+    transitions handle BPM jumps musically). Half-time/double-time are
+    natively compatible — a 87 BPM dnb track played alongside a 174 BPM
+    dnb track is the SAME pulse perceptually (every 2nd beat = downbeat
+    of half-time). Octave-fold both BPMs into canonical band before
+    comparing so trap-tempo half-time errors don't reject good matches.
+
+    Default 15% widens to effective ~30% via octave equivalence.
+    """
+    if lib_bpm <= 0 or user_bpm_mean <= 0:
+        return True  # missing data → allow, score will catch
+    try:
+        from tempo_octave import normalize_tempo
+        u = normalize_tempo(user_bpm_mean)
+        l = normalize_tempo(lib_bpm)
+    except Exception:
+        u, l = user_bpm_mean, lib_bpm
+    return abs(l - u) / u <= bpm_tol_pct / 100.0
+
+
 def _candidate_pool_for_user_clip(user_emb, user_bpm_mean: float | None,
                                     bpm_tol_pct: float, top_k: int):
     """Score the whole library by cosine to ONE user clip's CLAP embedding.
@@ -291,7 +314,10 @@ def _candidate_pool_for_user_clip(user_emb, user_bpm_mean: float | None,
                 import json as _json
                 m = _json.loads(meta.read_text())
                 bpm = float(m.get("tempo", 0.0))
-                if bpm > 0 and abs(bpm - user_bpm_mean) / user_bpm_mean > bpm_tol_pct / 100.0:
+                # Octave-aware BPM gate (was hard ±15%, blocked all
+                # half-time-detected library clips). Open-format DJs do
+                # BPM-jumps; half/double tempo are natively compatible.
+                if not _bpm_compat(bpm, user_bpm_mean, bpm_tol_pct):
                     continue
             sim = float((a @ user_emb) / (np.linalg.norm(a) * enorm + 1e-9))
             cands.append((sim, p, npz, meta))
@@ -303,7 +329,7 @@ def _candidate_pool_for_user_clip(user_emb, user_bpm_mean: float | None,
 
 def library_clip_paths_clap(centroid, count: int,
                               user_bpm_mean: float | None = None,
-                              bpm_tol_pct: float = 15.0,
+                              bpm_tol_pct: float = 30.0,
                               user_keys: list[str] | None = None,
                               user_clap_embs: list = None,
                               ) -> list[Path]:
@@ -430,15 +456,25 @@ def library_clip_paths_clap(centroid, count: int,
             bpm = float(m.get("tempo", 0.0))
             lib_key = str(m.get("key", "?"))
 
-            # Hard BPM filter — out-of-band clips are rejected outright.
+            # Octave-aware BPM filter — half/double-time tracks are
+            # treated as compatible. Open-format DJs jump BPMs musically
+            # via echo_out/cut transitions per dj_research.md.
             if user_bpm_mean is not None and bpm > 0:
-                if abs(bpm - user_bpm_mean) / user_bpm_mean > bpm_tol_pct / 100.0:
+                if not _bpm_compat(bpm, user_bpm_mean, bpm_tol_pct):
                     continue
 
-            # BPM proximity score (within band)
+            # BPM proximity score (within band) — octave-fold both for fair
+            # comparison so half-time-detected lib clip doesn't lose to
+            # full-tempo lib clip just because of detection inconsistency.
             bpm_score = 0.0
             if user_bpm_mean is not None and bpm > 0:
-                bpm_score = max(0.0, 1.0 - abs(bpm - user_bpm_mean) / user_bpm_mean / 0.10)
+                try:
+                    from tempo_octave import normalize_tempo
+                    u_n = normalize_tempo(user_bpm_mean)
+                    l_n = normalize_tempo(bpm)
+                    bpm_score = max(0.0, 1.0 - abs(l_n - u_n) / u_n / 0.15)
+                except Exception:
+                    bpm_score = max(0.0, 1.0 - abs(bpm - user_bpm_mean) / user_bpm_mean / 0.10)
 
             key_bonus = _camelot_compat_bonus(lib_key, user_keys or [])
             outlier = _outlier_penalty(a, user_clap_embs or [])
