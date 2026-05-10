@@ -502,16 +502,50 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
                 "Running on AMD MI300X · AGPL-3.0")
 
     with gr.Tab("Demo"):
-        gr.Markdown("Pre-baked mixes from the same engine.")
-        for label, slug, desc in DEMO_MIXES:
-            with gr.Row(equal_height=True):
-                gr.Markdown(f"### {label}\n_{desc}_")
+        gr.Markdown(
+            "### Pre-baked mixes\n"
+            "_Each mix below is a real render from the same backend. "
+            "Same pipeline behind every Try It render._")
+        # Fetch featured/ from backend at module-load time. Falls back to
+        # static demo_mp3/ in Space repo if backend offline.
+        featured_clips = []
+        try:
+            r = requests.get(f"{MI300X_URL}/featured", timeout=6)
+            if r.ok:
+                featured_clips = r.json().get("clips", [])
+        except Exception:
+            pass
+
+        if featured_clips:
+            for c in featured_clips:
+                stem = c.get("name", "demo")
+                pretty_name = stem.replace("_", " ").title()
+                url = f"{MI300X_URL}{c['url']}"
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown(
+                            f"#### {pretty_name}\n"
+                            f"_{c['duration_sec']:.0f}s · {c['size_mb']:.1f} MB_")
+                    with gr.Column(scale=2):
+                        gr.Audio(url, label=pretty_name,
+                                 interactive=False, autoplay=False,
+                                 show_download_button=True)
+        else:
+            # Fallback to baked-into-space demo_mp3 dir
+            for label, slug, desc in DEMO_MIXES:
                 mp3 = DEMO_DIR / f"{slug}.mp3"
-                if mp3.exists():
-                    gr.Audio(str(mp3), label="", interactive=False,
-                             show_download_button=True)
-                else:
-                    gr.Markdown(f"_pending render: `{slug}.mp3`_")
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown(f"#### {label}\n{desc}")
+                    with gr.Column(scale=2):
+                        if mp3.exists():
+                            gr.Audio(str(mp3), label=label,
+                                     interactive=False, autoplay=False,
+                                     show_download_button=True,
+                                     type="filepath")
+                        else:
+                            gr.Markdown(
+                                f"⚠ _missing demo file `{slug}.mp3`._")
 
     with gr.Tab("Try It"):
         gr.Markdown(
@@ -695,34 +729,129 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
         app.load(show_who, None, [who_md, signin_notice, render_panel])
 
     with gr.Tab("How it works"):
-        gr.Markdown("""
-### Pipeline
+        gr.HTML("""
+<style>
+.aij-flow {display:flex; gap:8px; margin:18px 0; flex-wrap:wrap;
+           font-family:ui-monospace,monospace; font-size:12px;}
+.aij-flow .step {flex:1; min-width:140px; padding:14px;
+                 background:linear-gradient(180deg,#1a1d2440,#0f1218a0);
+                 border:1px solid #1f2229; border-radius:6px;
+                 border-top:2px solid #ff2d6f;}
+.aij-flow .step h4 {margin:0 0 8px 0; color:#f1f5f9; font-size:14px;
+                    font-family:'Inter',sans-serif; letter-spacing:0.04em;}
+.aij-flow .step .sub {color:#94a3b8; font-size:11px; line-height:1.6;}
+.aij-flow .arr {color:#ff2d6f; font-size:24px; align-self:center;
+                font-weight:700;}
+.aij-grid {display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+           gap:16px; margin:18px 0;}
+.aij-card {padding:16px; border:1px solid #1f2229; border-radius:6px;
+           background:#0f1218; }
+.aij-card h4 {color:#22d3ee; font-size:12px; letter-spacing:0.16em;
+              text-transform:uppercase; margin:0 0 8px 0;}
+.aij-card .v {color:#f5f6fa; font-size:13px; line-height:1.7;}
+.aij-card code {background:#1a1d24; padding:1px 6px; border-radius:3px;
+                font-size:11px; color:#facc15;}
+.aij-mode-table {width:100%; border-collapse:collapse; margin:12px 0;
+                 font-size:13px;}
+.aij-mode-table th {text-align:left; padding:8px 14px 8px 0;
+                    color:#94a3b8; font-size:11px; letter-spacing:0.1em;
+                    text-transform:uppercase; font-weight:500;
+                    border-bottom:1px solid #1f2229;}
+.aij-mode-table td {padding:8px 14px 8px 0; color:#e2e8f0;
+                    border-bottom:1px solid #14161c;}
+.aij-mode-table .modecol {color:#ff2d6f; font-weight:600;}
+</style>
 
-1. **Analyze** — Demucs stems, librosa beats and key, structural segmentation,
-   CLAP semantic embedding per clip on GPU.
-2. **Plan** — Beam search over the clip pool with arc-shape and text-prompt
-   bias from a Director LLM.
-3. **Execute** — 15+ transition techniques: cut, eq_swap, drum_break, mashup,
-   echo_out, spinback, loop_tighten, others.
-4. **Master** — HP30, multiband and glue compression, LUFS normalization,
-   true-peak limiter.
+<h3 style='color:#f5f6fa; margin-top:0;'>The pipeline</h3>
+<div class='aij-flow'>
+  <div class='step'><h4>1 · Analyze</h4>
+    <div class='sub'>Demucs stem separation (vocals / drums / bass / other).
+    librosa beats + key + structural segmentation. CLAP 512-d semantic
+    embedding per clip on MI300X.</div></div>
+  <div class='arr'>→</div>
+  <div class='step'><h4>2 · Plan</h4>
+    <div class='sub'>Director LLM produces narrative + per-junction
+    transition tier intents. Beam search over clip pool with arc-shape +
+    text-prompt + Camelot key + BPM compatibility scoring.</div></div>
+  <div class='arr'>→</div>
+  <div class='step'><h4>3 · Execute</h4>
+    <div class='sub'>15+ transition techniques: cut, crossfade, eq_swap,
+    filter_fade, drum_break, mashup, stem_swap, echo_out, spinback,
+    pitch_bend, loop_tighten, scratch, more. Phrase-quantized,
+    stem-aware overlap.</div></div>
+  <div class='arr'>→</div>
+  <div class='step'><h4>4 · Master</h4>
+    <div class='sub'>HP30 → multiband + glue compression → optional tape
+    saturation → LUFS norm → true-peak limiter. Adaptive — eases
+    glue-comp when integrated loudness already high.</div></div>
+</div>
 
-### Library option
+<h3 style='color:#f5f6fa;'>Modes — output style</h3>
+<table class='aij-mode-table'>
+<thead><tr><th>knob</th><th>mashup</th><th>dj_set</th></tr></thead>
+<tbody>
+<tr><td class='modecol'>arc</td><td>build</td><td>tomorrowland (multi-peak)</td></tr>
+<tr><td class='modecol'>tape sat</td><td>off</td><td>on (drive 0.3)</td></tr>
+<tr><td class='modecol'>min minor %</td><td>≥85% smooth</td><td>≥65% (more majors)</td></tr>
+<tr><td class='modecol'>vocal guard</td><td>strict 0.30</td><td>looser 0.40</td></tr>
+<tr><td class='modecol'>segment len</td><td>≥28s, no cap</td><td>18–28s rotation</td></tr>
+<tr><td class='modecol'>callbacks</td><td>2</td><td>4</td></tr>
+<tr><td class='modecol'>reuse cooldown</td><td>5 entries</td><td>1 entry</td></tr>
+<tr><td class='modecol'>vibe</td><td>Polished. Long camps. Studio-quality background.</td>
+                          <td>Festival peaks. Variety. Live-mix dramatic.</td></tr>
+</tbody>
+</table>
 
-When **use sample library** is checked, the planner can blend in pre-analyzed
-curated clips for variety. Modes:
+<h3 style='color:#f5f6fa;'>Library augmentation</h3>
+<div class='aij-grid'>
+  <div class='aij-card'><h4>tight</h4>
+    <div class='v'>User clips only. Smallest pool, tightest narrative,
+    fastest analyze.</div></div>
+  <div class='aij-card'><h4>balanced</h4>
+    <div class='v'>Adds library clips for ~30% headroom. Director can
+    use them as bridges or warm-up. Default.</div></div>
+  <div class='aij-card'><h4>exploratory</h4>
+    <div class='v'>Aggressive blend up to 12 library clips. Best when
+    user pool is small / monotone.</div></div>
+</div>
 
-- **tight** — user clips only
-- **balanced** — adds enough library clips to fill 30% headroom
-- **exploratory** — aggressive library blend up to 12 clips
+<h3 style='color:#f5f6fa;'>Auto-quality signals</h3>
+<div class='aij-grid'>
+  <div class='aij-card'><h4>probe</h4>
+    <div class='v'>Numpy probes per junction: RMS-envelope mismatch,
+    vocal-bleed cross-correlation, spectral-phasing diff. Cheap, deterministic.
+    Catches ~70% of audible artifacts.</div></div>
+  <div class='aij-card'><h4>CriticV2</h4>
+    <div class='v'>Trained classifier head over CLAP embeddings + DSP
+    features. Confidence 0–1.</div></div>
+  <div class='aij-card'><h4>Audiobox aesthetics</h4>
+    <div class='v'>Meta's pretrained reference-free quality model. Four
+    axes: <code>PQ</code> production quality, <code>PC</code> production
+    complexity, <code>CE</code> content enjoyment, <code>CU</code> content
+    usefulness. 0–10.</div></div>
+</div>
 
-### Auto-quality signals
+<h3 style='color:#f5f6fa;'>Stack</h3>
+<div class='aij-grid'>
+  <div class='aij-card'><h4>compute</h4>
+    <div class='v'>AMD MI300X (192 GB HBM, gfx942) on AMD Developer Cloud.
+    ROCm 6 + PyTorch 2.3. Up to 4 jobs in parallel; GPU stages serialize
+    via mutex.</div></div>
+  <div class='aij-card'><h4>models</h4>
+    <div class='v'>Demucs htdemucs_ft, LAION CLAP, Beat-This!,
+    Qwen2.5-7B-Instruct (Director), Audiobox aesthetics.</div></div>
+  <div class='aij-card'><h4>frontend</h4>
+    <div class='v'>Gradio 5 on HF Spaces (free CPU tier). HF OAuth gate.
+    1 render / user / 24h. ngrok stable tunnel to MI300X.</div></div>
+  <div class='aij-card'><h4>license</h4>
+    <div class='v'>AGPL-3.0. Forks (including SaaS) must remain open
+    source under same license.</div></div>
+</div>
 
-Each render returns a probe verdict (energy / vocal-bleed / spectral phasing
-across junctions) plus an Audiobox-style critic score. Both shown in the
-output summary.
-
-[github.com/architagrawal/aiJockey](https://github.com/architagrawal/aiJockey) · AGPL-3.0
+<p style='margin-top:24px; color:#94a3b8; font-size:12px;'>
+<a href='https://github.com/architagrawal/aiJockey' target='_blank'
+   style='color:#22d3ee;'>github.com/architagrawal/aiJockey</a>
+</p>
 """)
 
 

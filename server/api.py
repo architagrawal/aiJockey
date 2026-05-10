@@ -789,6 +789,59 @@ def list_sample_clips():
     return {"clips": out, "dirs": [str(d) for d, _, _ in SAMPLE_CLIPS_DIRS]}
 
 
+FEATURED_DIR = ROOT / "output" / "featured"
+
+
+@app.get("/featured")
+def list_featured():
+    """List pre-baked demo mixes in /workspace/output/featured/.
+
+    No auth required — these are public demos. Files served via
+    GET /featured/{filename}.
+    """
+    if not FEATURED_DIR.exists():
+        return {"clips": []}
+    out = []
+    for p in sorted(FEATURED_DIR.iterdir()):
+        if p.suffix.lower() not in (".mp3", ".wav", ".flac"):
+            continue
+        try:
+            sz = p.stat().st_size
+            dur = audio_duration_seconds(p)
+        except Exception:
+            continue
+        if sz < 10240 or dur < 5:
+            continue
+        out.append({
+            "id": p.name,
+            "name": p.stem,
+            "size_mb": round(sz / 1024 / 1024, 1),
+            "duration_sec": round(dur, 1),
+            "url": f"/featured/{p.name}",
+        })
+    return {"clips": out}
+
+
+@app.get("/featured/{filename}")
+def get_featured(filename: str):
+    """Serve a featured demo mp3. Path-traversal guarded."""
+    if not FEATURED_DIR.exists():
+        raise HTTPException(404, detail="featured dir absent")
+    p = FEATURED_DIR / filename
+    try:
+        resolved = p.resolve()
+        if not str(resolved).startswith(str(FEATURED_DIR.resolve())):
+            raise HTTPException(400, detail="invalid path")
+    except Exception:
+        raise HTTPException(400, detail="invalid path")
+    if not p.exists():
+        raise HTTPException(404, detail="not found")
+    media = {"mp3": "audio/mpeg", "wav": "audio/wav",
+             "flac": "audio/flac"}.get(p.suffix.lstrip(".").lower(),
+                                        "application/octet-stream")
+    return FileResponse(str(p), media_type=media, filename=p.name)
+
+
 @app.get("/quota")
 def quota(x_user_id: str | None = Header(default=None, alias="X-User-Id"),
           x_key: str | None = Header(default=None, alias="X-Key")):
