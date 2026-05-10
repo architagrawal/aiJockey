@@ -1,230 +1,187 @@
-# AiJockey — Session Handoff (2026-05-09)
+# AiJockey — Session Handoff (2026-05-10)
 
-Resume reference for next conversation. Read this first to recover full context.
-
----
-
-## Where we are
-
-**Branch**: `best-output-pipeline` (head: `9c7a52a`, pushed to origin)
-
-**Live state**: MI300X 1× ($1.99/hr) running at `165.245.135.121`. Container `rocm` mounts `/root/aijockey` → `/workspace`. Snapshot `aijockey-slim` (109.7 GB, atl1) is the boot image — has 103 pre-analyzed clips at `/cache`.
-
-**SSH**: `ssh -i "C:/Users/msi-laptop/.ssh/aijockey_mi300x" root@165.245.135.121`
-
-**Render path**: works end-to-end. test1.wav + test2.wav → `output/gpu_pulls/test_3min_v3.wav` (136 s, Director-driven, narrative + intents present).
+**Resume reference for next session. Read this first.**
 
 ---
 
-## What got done this session
+## Where we are RIGHT NOW
 
-### Foundation (`best-output-pipeline` core)
-- Phrase quantization (planner + execute)
-- Stem-additive overlap (kills phasey vocal-mute artifact)
-- Humanized accent FX (±8 ms / ±8 % deterministic seed)
-- Sample lib whitelist (no airhorn/meme pollution)
-- Constitutional rule validator (phrase-grid, drop-section, breakdown-pair, bpm-drift, key-compat, accent-budget, **user-clip-floor**)
-- 3-tier vocab + 3-arc Phase 1 scope
-- Min-segment length enforcement + overlap clamp (1/3 of shorter side, 8-bar cap, bars shadowed into transition primitives)
-- Tier propagation into `transition_in['tier']` so constitutional sees Director's intent
-
-### Intelligence layer
-- `src/pool_intelligence.py` — pool inventory (USER/LIB tag, genre, BPM, section, energy), clusters, coherence score, diagnose verdict + narrative_advice
-- Director SYSTEM_PROMPT_PHASE1 — pool inventory injected, demands `set_narrative` + `narrative_notes` + per-junction `transition_intents` (7 categories)
-- `apply_llm_transition_tiers_to_timeline(transition_intents=...)` propagates intent
-- `card.json` saved next to render with full reasoning trail
-
-### Library augmentation UX
-- `mix_mode` enum (`tight` / `balanced` (default) / `exploratory`)
-- `library_role` optional (`bridges_only` / `warmup_outro` / `fill_gaps` / `any`)
-- `lib_count_for_mode(mode, user_count, user_total_dur, target_duration)` formula
-- `library_clip_paths_clap()` — CLAP-cosine retrieval against library cache, BPM ±15 % filter
-- Source tagging: user clips get `source='user'`, library clips get `source='library'` in cache JSON
-- Constitutional `check_user_clip_floor` warns if any user clip missing from timeline
-- Response headers: `X-Mix-Mode`, `X-Clips-Used` JSON `{user_count, library_count, library_ids[]}`
-
-### Performance
-- Demucs default `htdemucs_ft` (~0.5 dB SDR cleaner stems) with BagOfModels guard against `torch.compile` crash
-- bf16 autocast on Demucs/Director (MI300X native)
-- ROCm-safe `torch.compile` mode default (`'default'`, not `'reduce-overhead'`)
-- Stem-parallel rubberband via ThreadPoolExecutor (~3-4× CPU util on render)
-- Timeline-segment parallel render (`AIJOCKEY_RENDER_WORKERS=2`)
-- Free-as-you-go memory: `rendered[i-1] = None` after consumed
-- Single-call rubberband (`AIJOCKEY_RB_COMBINED=1`)
-- CLAP batched embeddings + Qwen2-Audio batched captions
-
-### Render bug fixes (live-discovered on MI300X)
-- 9 commits chained from `5b4f9cd` → `f68b62b` (see STATUS.md table for full list with commit refs)
-- Fix highlights: tier propagation, min-segment 8 bars, overlap clamp passed to primitives, Qwen3-8B revert (model doesn't exist on HF), tokenizer max_length 2048 → 8192, mt cap 64 → 16
-
-### Docs
-- STATUS.md — top session-update block, 9-bug commit table, smoke progression table
-- AGENTS.md — Director row + Pool intelligence row, `/generate` form fields, audio Director caveats, `HF_DIRECTOR_MODEL` corrected
-- docs/dj_research.md, docs/phase1_plan.md (earlier in branch)
-
-### Tests
-- 14/14 unit tests pass (`tests/test_constitutional.py`, `tests/test_phrase_quantize.py`, `tests/test_transition_mapping.py`)
+- **Single branch**: `best-output-pipeline @ df1593e` (tier1-upgrades merged + deleted)
+- **Live droplet**: MI300X at `165.245.135.121`. Container `rocm`. SSH:
+  `ssh -i C:/Users/msi-laptop/.ssh/aijockey_mi300x root@165.245.135.121`
+- **Library**: 158 clips at `/cache` (113 base + 55 Incompetech instrumentals downloaded this session)
+- **Pre-staged user pools**: `/workspace/user_set` (4), `/workspace/user_genres/{chillstep,dnb,dubstep,future_bass}` (6 each), `/workspace/test_user_clips` (2)
+- **Models loaded**: Beat-This + Demucs htdemucs_ft + Mel-Band Roformer (`/cache/models/MelBandRoformer.ckpt`, 913 MB) + CLAP + Qwen2.5-7B Director + Audiobox Aesthetics
 
 ---
 
-## Open issues (known)
+## What landed this session
 
-| Issue | Where | Severity |
-|---|---|---|
-| ~~Downbeat heuristic `beats[::4]`~~ — RESOLVED via Beat-This! integration (`src/beat_this_wrapper.py`); librosa stays as last-resort fallback | `src/analyze.py:beats_and_downbeats` | **resolved** (validate on MI300X) |
-| Audio Director path exists but capped at 6 user clips × 30 s window | `src/director.py:_call_qwen2audio` | low — documented in AGENTS.md |
-| Qwen3-8B-Instruct ID does not exist on HF | reverted in `f68b62b` | resolved |
-| htdemucs_ft + torch.compile = crash | guard added in `aeb75ac` | resolved |
-| 2-clip user pool ceiling: render 136 s of 180 s target | inherent to pool size | use library augmentation for longer outputs |
-| Pool of 103 cached clips is genre-disparate (20 genres, BPM 57-195, coherence 0.0) | snapshot lib | curate by genre cluster OR user supplies tighter clips |
+### 1. Director — tier diversity + organic guidance (src/director.py)
+- Post-LLM enforcement: `AIJOCKEY_DIRECTOR_TIER_ENFORCE=1` caps minor at `MAX_MINOR_PCT=0.75` (configurable). Promotes interior minors → major when LLM picks all-safe.
+- SYSTEM_PROMPT_PHASE1 strengthened with Tomorrowland narrative-driven structure (opener → climb → first peak → valley → bigger peak → callback → outro).
+- Vocal-aware tier placement guidance.
+- force_drop + auto_accent kept behind env knobs (default off — felt artificial per user feedback).
 
----
+### 2. Vocal_guard — relaxed per dj_research §6 (src/execute.py)
+Three-tier gate replacing single AGGRESSIVE_VS_VOCALS list:
+- **SHREDDERS** (always reject when VA>0.30): pitch_bend, bpm_warp, tape_stop, chop, scratch_fill, beat_juggle, loop_roll, loop_tighten, spectral_hold, spinback, forward_spin
+- **HEAVY** (reject when VA>0.55): drum_replace, kickless_swap, snare_buildup, build_riser_drop, punch_in
+- **ARTIFACT_PRONE** (NEW — reject when VA>0.15, downgrade to gentler equivalent): drum_replace→drum_break, bass_swap→long_crossfade, instrumental_swap→mashup, kickless_swap→highs_swap
 
-## Next tasks (priority order)
+### 3. Restricted-mode whitelist expanded 12→30 (src/restricted_mode.py)
+Added all vocal-safe transitions per dj_research: short/long_crossfade, bass_swap, highs_swap, frequency_blend, highpass_sweep_in, band_filter_sweep, punch_in, kickless_swap, drum_replace, instrumental_swap, acapella_drop, reverb_wash, harmonic_overlay, riser_overlay, impact_overlay, snare_buildup, build_riser_drop. Time/pitch/per-sample warps still safely excluded.
 
-### P0 — DONE this session (validate on MI300X)
+### 4. Vocal-phrase boundary snap (src/execute.py + src/vocal_phrase.py)
+`snap_segment_end_to_vocal_silence()` runs after phrase-quantize. Per junction, scans vocals stem RMS in [end-1.5, end+5.0], finds earliest 0.25s+ window below -36dB, snaps end there. Vocals never cut mid-phrase. `AIJOCKEY_VOCAL_END_SNAP=0` disables.
 
-**1. Beat-This! integration** — DONE (`src/beat_this_wrapper.py`, wired into `Analyzer.beats_and_downbeats`). madmom DBN postprocessor active when madmom installed (CPJKU main 0.17.dev0+ builds on Py3.10). Falls through to librosa otherwise. **Validated**: madmom DBN gives correct 4:1 beats:downbeats ratio (test1: 282b/71db, ratio 3.97).
+### 5. Segment cap for set rotation (src/planner.py)
+- `min_segment_seconds: 30→18` + `max_segment_seconds: 32` (NEW)
+- Net: 5min set goes from 5-8 entries (no rotation) → 11-16 entries (A-B-C-A-D callbacks)
 
-**2. BS-Roformer for vocal stem** — SCAFFOLD DONE (`src/bs_roformer_wrapper.py`, `Analyzer._maybe_swap_vocals`). Opt-in: `AIJOCKEY_BS_ROFORMER=1` + `AIJOCKEY_BS_ROFORMER_CKPT=/path`. drums/bass/other still demucs. Need to download a vocals checkpoint + smoke.
+### 6. Tomorrowland multi-peak arc (src/planner.py)
+`ARC_PRESETS['tomorrowland'] = [0.35, 0.55, 0.80, 0.95, 0.55, 0.45, 0.70, 0.95, 1.0, 0.85, 0.60, 0.35]` — opener → first peak → valley → bigger peak → cooldown.
 
-**GPU saturation pass** — DONE + VALIDATED. GPU was 4% util; new batched-Demucs path (`stems_batch`), stage1 micro-batching (default 4 clips/forward), CLAP chunking, bumped `_RENDER_WORKERS` 2→6 + `_STEM_WORKERS` 4→8. **Measured**: 95-100% GPU util peak during batched Demucs + Director on MI300X.
+### 7. Tape saturation mastering (src/master.py)
+Mid-band tanh asymmetric soft-clip after multi-band compression. `AIJOCKEY_MASTER_TAPE_SAT=1` + `AIJOCKEY_MASTER_TAPE_DRIVE=0.6` defaults. Marginal Audiobox lift.
 
-**Probe + improver + cohort framework** — DONE this session.
-- `src/audio_probes.py` — RMS env / vocal-bleed xcorr / spectral phasing
-- `src/probe_log.py` — atomic JSONL append per render, summarize() by_cohort
-- `src/improver.py` — diagnose probes → TimelineEdit list, env-gated actions
-- `src/planner.py:repick_energy_constrained_segments` — energy_repick no longer stub
-- `scripts/run_baseline.sh` — 4-cohort cumulative ablation runner (A=off, B=E, C=E+O, D=E+O+S)
-- Probes wired into `/generate` `X-Probe` header + `cmd_execute` CLI
-- Cohort run kicked on MI300X: 80 rows ETA ~60 min
+### 8. Library expansion +55 clips
+55 Incompetech CC-BY tracks downloaded + analyzed. VA mean **0.017** (super instrumental) — fills the vocal-balance gap in the prior library. Sources direct mp3 wget, no bot block.
 
-**Composite library picker** — DONE.
-- Spotify-pattern two-stage: per-user-clip multi-query retrieval → composite re-rank (CLAP + Camelot key + BPM + outlier penalty) → mismatch gate (return [] when all scores < 0)
-- Verified: test1+test2 vs 103-clip lib → composite correctly identifies NO MATCH, returns []. CLAP-only forced disparate picks → 0.94 probe severity.
+### 9. UI preset system (server/preset.py — NEW)
+Drop-in `apply_preset(mode, vocals, style, arc, mix_mode, advanced, base_prompt)` returns `(env_overrides, cli_overrides)`. Plus `compose_cli_args()` and `PRESET_SCHEMA` + `ADVANCED_SCHEMA` for frontend auto-render.
 
-**Tempo octave normalization** — DONE.
-- `src/tempo_octave.py` (teammate) wired into `analyze.beats_and_downbeats` + `execute.stretch_and_pitch`
-- Catches half/double-time tracker errors at analyze AND execute boundaries
-- Genre prior auto-detected from filename prefix
+Mode presets:
+- **mashup**: tape sat off, strict vocal_guard (0.30/0.45), arc=build, callbacks=2, no segment cap. v6-style PQ ~7.84.
+- **dj_set**: tape sat on (drive 0.3), relaxed vocal_guard (0.40/0.60), arc=tomorrowland, callbacks=4, segment cap 28s. v9/v12-style with peaks.
 
-**Constitutional `check_pool_coherence`** — DONE. Warn rule for stylistic outliers in timeline (centroid distance > 0.45).
+Vocals presets: `on` (default) / `off` (instrumental_only) / `dim` (-6dB, needs ~5 LOC in execute.py).
 
-### P1 — UX completion + observability
+Style presets: festival_inferno, midnight_noir, neon_retrowave, east_meets_bass, bollywood_block_party (5 CLAP-text + arc shortcuts).
 
-**3. Wire CriticV2 (`scripts/stage4_critic.py` model) into `/generate` as global score gate**
-- Trained checkpoint exists at `checkpoints/mix_critic.pt` per STATUS.md
-- Output rendered mix → CriticV2 forward → score in 0..1
-- Threshold gate: if score < 0.5, skip ship, flag for re-plan (or fall through with warning)
-- Enables future self-critique loop without paying LLM tax
+### 10. /generate endpoint wired with preset (server/api.py)
+- New form fields: `mode`, `vocals`, `style`, `advanced_json`, `sample_clip_ids`
+- `apply_preset()` dispatched, env_overrides + cli_overrides flow into subprocess
+- New endpoints: `/preset_schema` (frontend auto-render), `/sample_clips` (load-demo button)
+- Phase 1 arc fallback: tomorrowland → peak when not in current phase
 
-**4. Cheap audio probes** (numpy-only, ~100 lines)
-- RMS envelope per stem at junction → energy-mismatch detector
-- Cross-correlation vocal stems prev/cur → vocal-bleed detector
-- Spectro diff @ overlap window → phasing detector
-- 100 ms each, catches 70 % of audio artifacts at 1 % the cost of an audio LLM critic
+### 11. Audiobox Aesthetics critic (Tier 1 C)
+Wired into /generate post-master. 4-axis score (PQ/PC/CE/CU) emitted as `X-Audiobox` response header + jlog row. Disable: `AIJOCKEY_AUDIOBOX_AESTHETICS=0`.
 
-**5. Test mix_mode + library augmentation end-to-end on MI300X**
-- Need real library populated at `/workspace/clips` + `/workspace/cache` (currently empty for library — only user-side test runs done)
-- Smoke 3 modes (tight / balanced / exploratory) with 3 user clips + library
-- Verify `X-Clips-Used` header populates correctly
-- Listen-test difference
-
-### P2 — quality compounding
-
-**6. Rule-based improver + surgical re-render** (only after P0+P1)
-- 3-5 issue-type → deterministic timeline edit map (e.g. `vocal_collision @ junction_5 → set instrumental_only=true for that overlap`)
-- Cascade re-render: changing segment N invalidates transitions N-1→N AND N→N+1, so re-render = segment + 2 transitions
-- Confidence threshold on critic findings (≥ 0.7 to act)
-
-**7. Audio LLM critic as fallback** (only when symbolic + cheap probes empty AND CriticV2 below threshold)
-- Qwen2-Audio with structured JSON output `{junction, issue_type, severity, confidence, suggested_fix}`
-- ~30-60 s latency tax per critique (realistic, not the 5-10 s teammate estimated)
-- Opt-in flag, never default
-
-**8. Style-RAG corpus build** (when training pipeline is wanted)
-- Run `scripts/stage3_embed.py` over a real DJ-set corpus to populate `/scratch/embed/clap.npy` + `clap_index.json` + `captions.json`
-- Director already reads via `style_rag.few_shot_block_for_director` — currently empty index = no retrieval. Populate to activate.
-
-### P3 — deferred / optional
-
-- Qwen3-4B-Instruct-2507 swap (newer family, smaller — quality regression possible vs Qwen2.5-7B)
-- Qwen3-235B-A22B-Instruct-2507 (MoE, 22B active, needs QLoRA on 192 GB)
-- Per-genre LoRA Director adapters
-- DPO loop (S5+S7 pipeline) if pre-render still produces consistently fixable mistakes
-- MuQ for music similarity (when library retrieval ranking matters)
-- Qwen2.5-Omni-7B (only when audio Director becomes critical path)
-
-### Demo / shipping items
-
-- Curate a clean 20-30 clip library by genre cluster at `/workspace/clips` (not the 103-clip dispar /cache snapshot)
-- Render 5 demo mixes using mix_mode=balanced + curated library
-- HF Space deploy with mix_mode UI knob
-- `aijockey-demo-ready` snapshot of final state, destroy live droplet
+### 12. Mel-Band Roformer vocal stems (Tier 1 A)
+Wrapper at src/mel_band_roformer_wrapper.py + 913MB ckpt at /cache/models/. Activate: `AIJOCKEY_MEL_BAND_ROFORMER=1` + `AIJOCKEY_MEL_BAND_ROFORMER_CKPT`.
 
 ---
 
-## Cost ledger
+## Demo gallery — 10 curated mixes
 
-- $80 of $100 AMD credits remaining at session start
-- ~10 hr droplet uptime this session ≈ $20
-- Remaining budget ~$60 ≈ 30 hr droplet time
+Path: `c:/Archit/MyCoding/Development/AiJockey/output/featured/` + `README.md`
 
----
-
-## How to resume in a new conversation
-
-1. **Read this file first** — `docs/HANDOFF.md`
-2. **Check branch**: `git log --oneline best-output-pipeline ^main | head -5` should show `9c7a52a` at top (or later)
-3. **Verify GPU live**: `ssh -i "C:/Users/msi-laptop/.ssh/aijockey_mi300x" root@165.245.135.121 "docker ps"` should show `rocm` container running. If droplet destroyed, see [server/DEPLOY_AMD.md](../server/DEPLOY_AMD.md) for re-spin from snapshot.
-4. **Verify tests pass**: `python -m pytest tests/test_constitutional.py tests/test_phrase_quantize.py tests/test_transition_mapping.py -q` should be `14 passed`.
-5. **Listen to test_3min_v3.wav**: at `output/gpu_pulls/test_3min_v3.wav` — that's the current quality baseline (Director-driven, htdemucs_ft, all DSP fixes active).
-6. **Read STATUS.md top block** — most up-to-date code/commit map.
-7. **Pick next task from P0 above** (Beat-This! is highest leverage).
-
----
-
-## Key files to know
-
-| File | Role |
-|---|---|
-| `src/director.py` | LLM Director with pool-aware system prompt + narrative + intents |
-| `src/pool_intelligence.py` | Pool tagging, clustering, diagnose, summary table |
-| `src/constitutional.py` | Hard musical rules + repair |
-| `src/execute.py` | Render path with phrase-quantize + min-segment + overlap clamp + stem-swap |
-| `src/analyze.py` | Demucs (htdemucs_ft default) + CLAP + librosa beats |
-| `server/api.py` | `/generate` endpoint with mix_mode + library augmentation |
-| `src/main.py` | CLI orchestrator (analyze / plan / execute / master) |
-| `tests/` | 14 unit tests, all passing |
-| `STATUS.md` | Current truth |
-| `AGENTS.md` | Deploy playbook + env vars |
-| `docs/dj_research.md` | DJ domain research grounding |
-| `docs/phase1_plan.md` | Original plan (earlier in branch) |
+| # | file | PQ | role |
+|---|---|---|---|
+| 1 | userset_v6_t1.mp3 | **7.84** | mashup gold standard |
+| 2 | mega_cross_genre.mp3 | **7.64** | flagship 6-min Tomorrowland cross-genre journey |
+| 3 | genre_chillstep.mp3 | 7.60 | pure chillstep set |
+| 4 | aug_dnb.mp3 | 7.58 | dnb + library bridges |
+| 5 | genre_dnb.mp3 | 7.57 | pure DnB high-energy |
+| 6 | aug_chillstep.mp3 | 7.51 | chillstep + bridges |
+| 7 | genre_future_bass.mp3 | 7.42 | future bass uplifting |
+| 8 | userset_v12.mp3 | 7.23 | dj_set + VA gate (best variety+quality balance) |
+| 9 | userset_v9_t1.mp3 | 7.15 | dj_set raw variety (A/B with v12) |
+| 10 | genre_dubstep.mp3 | 7.14 | dubstep peaks |
 
 ---
 
-## Smoke test command (verify everything works)
+## Audiobox Aesthetics — measured ceilings
 
-```bash
-ssh -i "C:/Users/msi-laptop/.ssh/aijockey_mi300x" root@165.245.135.121 "docker exec rocm bash -c '
-cd /workspace
-export AIJOCKEY_PHASE=1 AIJOCKEY_DTYPE=bfloat16 AIJOCKEY_FLASH_ATTN=1
-export AIJOCKEY_PHRASE_QUANTIZE=1 AIJOCKEY_STEM_SWAP=1 AIJOCKEY_CONSTITUTIONAL=1
-export AIJOCKEY_INSTRUMENTAL_ONLY=1 AIJOCKEY_USE_DIRECTOR_LLM=1
-export TRANSFORMERS_VERBOSITY=error
-cd src
-python3 main.py plan --cache /workspace/test_user_cache --out /workspace/output/smoke_timeline.json \
-  --duration 180 --arc build --use_director --apply_llm_tiers \
-  --min_unique_clips 2 --max_clips 2 \
-  --prompt \"3 minute mix\"
-python3 main.py execute --timeline /workspace/output/smoke_timeline.json \
-  --cache /workspace/test_user_cache --out /workspace/output/smoke_raw.wav
-python3 main.py master --in /workspace/output/smoke_raw.wav \
-  --out /workspace/output/smoke.wav --lufs -9
-cat /workspace/output/card.json
-'"
+Across 12+ render iterations (v2 → v12 + 9 genre demos):
+
+- **PQ ceiling** = 7.84 (v6_t1 mashup). Adding variety always costs PQ (more transitions = more artifact accumulation).
+- **CE peak** = 7.22 (v5 dj_set with strong arc).
+- **DJ-set quality recovery via VA gate**: v9 (7.15) → v12 (7.23) — kept 11 unique transitions while clamping artifact-prone techs on vocal junctions.
+- **Pool quality dominates everything**: picker upgrades > stem model > DSP-level (DTW, harmonic_cap). Mel-Band activation: lateral on Audiobox aggregate.
+
+---
+
+## Active env knobs (production defaults)
+
+```
+AIJOCKEY_PHASE=1
+AIJOCKEY_USE_DIRECTOR_LLM=1
+AIJOCKEY_VOCAL_GUARD=1
+AIJOCKEY_VOCAL_GUARD_THR=0.30
+AIJOCKEY_VOCAL_GUARD_THR_HEAVY=0.55
+AIJOCKEY_VOCAL_GUARD_THR_QUALITY=0.15
+AIJOCKEY_VOCAL_END_SNAP=1
+AIJOCKEY_VOCAL_SAFE_STRETCH=1
+AIJOCKEY_VOCAL_RAMP_BEATS=4
+AIJOCKEY_DIRECTOR_TIER_ENFORCE=1
+AIJOCKEY_DIRECTOR_MAX_MINOR_PCT=0.75
+AIJOCKEY_MASTER_TAPE_SAT=1
+AIJOCKEY_MASTER_TAPE_DRIVE=0.6
+AIJOCKEY_PHRASE_QUANTIZE=1
+AIJOCKEY_STEM_SWAP=1
+AIJOCKEY_CONSTITUTIONAL=1
+AIJOCKEY_CANDIDATE_PICKER=1
+AIJOCKEY_ALL_IN_ONE=1
+AIJOCKEY_MEL_BAND_ROFORMER=1
+AIJOCKEY_AUDIOBOX_AESTHETICS=1
+AIJOCKEY_DTW_ALIGN=1
+AIJOCKEY_HARMONIC_OVERLAP_CAP=1
 ```
 
-Expected: `card.json` contains real `set_narrative` (not deterministic fallback), narrative_notes admits pool limitations, transition_plan has tier+intent pairs.
+---
 
-If `_fallback: True` in director.json → Director failed to load. Likely env config issue.
+## Teammate's 5 ship tasks for demo (~1.5-2 hr)
+
+1. **Add `tomorrowland` to `PHASE1_ARCS`** (`server/api.py:60`) — 1 LOC. Unblocks dj_set arc differentiation.
+2. **Verify `apply_preset()` wire works in /generate** end-to-end on droplet — already merged, smoke test only.
+3. **Add `/preset_schema` endpoint reachable from frontend** — already in api.py, frontend just needs to fetch + render.
+4. **Frontend mode/vocals/style toggles in `space/app.py`** (Gradio) — radios + dropdown wired to form POST.
+5. **Demo button: pre-fill `dj_set` + 4 user clips + tomorrowland + festival_inferno** — load-demo button + sample_clips endpoint already shipped. Just wire UI handler.
+
+---
+
+## Known issues / TODO (post-demo)
+
+- **Phase 1 arc whitelist** doesn't include 'tomorrowland' yet. Preset asks for it → falls back to peak. Fix: add to PHASE1_ARCS list. (1 LOC.)
+- **vocal_dim mode**: preset.py exposes it but execute.py needs ~5 LOC to honor `AIJOCKEY_VOCAL_DIM_DB`.
+- **Audiobox-feedback rerank** wired in library_picker_score.py but call site missing in /generate post-master. Closed-loop quality improvement waiting.
+- **Multi-Director sampling** (temp>0, 3 plans, pick best) not shipped — biggest single-shot quality lift remaining.
+
+---
+
+## Critical paths
+
+| component | file |
+|---|---|
+| Preset logic | `server/preset.py` |
+| /generate handler | `server/api.py` |
+| Frontend | `space/app.py` |
+| Mode env mappings | `server/preset.py:_MODE_PRESETS` |
+| Director | `src/director.py` |
+| Vocal guard | `src/execute.py` (line ~689) |
+| Segment cap | `src/planner.py PlannerConfig` |
+| Tomorrowland arc | `src/planner.py ARC_PRESETS` |
+| Mastering | `src/master.py` |
+| DJ research source | `docs/dj_research.md` |
+| Demo mp3s | `output/featured/` (10 curated) |
+
+---
+
+## Quick smoke test on droplet
+
+```bash
+ssh -i C:/Users/msi-laptop/.ssh/aijockey_mi300x root@165.245.135.121
+docker exec rocm bash -lc 'cd /workspace && git pull origin best-output-pipeline'
+docker exec rocm curl -s http://localhost:PORT/preset_schema | head
+docker exec rocm curl -s http://localhost:PORT/sample_clips | head
+```
+
+Render direct CLI smoke (works without UI):
+```bash
+docker exec rocm python3 /workspace/src/main.py plan \
+  --cache /workspace/cache_user_set --out /tmp/tl.json --duration 240 \
+  --arc build --use_director --apply_llm_tiers \
+  --prompt "test" --callbacks 2 --reuse_cooldown 5 --max_clips 12
+```

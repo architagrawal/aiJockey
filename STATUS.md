@@ -1,7 +1,37 @@
 # AiJockey — Status, Progress, Plan, Bugs
 
 Snapshot of what works, what's broken, what's next.
-Last updated: 2026-05-09 (post probes + cohort framework + improver loop + planner re-pick + composite library picker on `best-output-pipeline`).
+Last updated: 2026-05-10 (post tier1 merge + dj_set/mashup presets + 12-render Audiobox eval + 10-mix demo gallery).
+
+---
+
+## Session update — preset modes + Audiobox eval + demo gallery (2026-05-10)
+
+**Single branch now**: `best-output-pipeline @ df1593e`. Tier1-upgrades merged in + deleted on remote.
+
+**Major shipped:**
+- `server/preset.py` — UI choice → env+CLI mapping (mashup / dj_set modes, vocals on/off/dim, 5 style presets, 22 advanced knobs). `apply_preset()` + `compose_cli_args()` + `PRESET_SCHEMA` exposed.
+- `/preset_schema` + `/sample_clips` endpoints (frontend auto-render + load-demo button)
+- Director tier diversity post-LLM enforcement (caps minor at 75% by default)
+- Vocal_guard 3-tier gate (SHREDDERS/HEAVY/ARTIFACT_PRONE) with gentle-equivalent fallbacks per dj_research §6
+- Restricted-mode whitelist 12→30 (was silently downgrading to crossfade)
+- `snap_segment_end_to_vocal_silence()` — never cuts vocal mid-phrase
+- Segment cap (18-32s) — forces A-B-C-A-D rotation in 5-min sets
+- Tomorrowland multi-peak arc preset
+- Tape saturation mid-band mastering
+- 55 Incompetech CC-BY instrumental clips → library expanded 113→158
+- Mel-Band Roformer 913MB ckpt @ /cache/models/
+- Audiobox Aesthetics critic wired into /generate
+
+**Audiobox results (12+ render iterations):**
+- PQ ceiling = 7.84 (mashup mode)
+- DJ-set with VA gate recovered 7.15→7.23 while keeping 11 unique transitions
+- mega_cross_genre = 7.64 PQ (best new flagship demo)
+
+**Demo gallery**: 10 curated mixes at `output/featured/` + README.md.
+Top picks: userset_v6_t1.mp3 (mashup), mega_cross_genre.mp3 (flagship), genre_dnb.mp3 (single-genre coherence), userset_v12.mp3 (dj_set quality+variety).
+
+**Teammate ship list (~1.5-2hr)**: see `docs/HANDOFF.md` "Teammate's 5 ship tasks" section.
 
 ---
 
