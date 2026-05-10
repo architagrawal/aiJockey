@@ -84,11 +84,31 @@ Resume reference for next conversation. Read this first to recover full context.
 
 ### P0 — DONE this session (validate on MI300X)
 
-**1. Beat-This! integration** — DONE (`src/beat_this_wrapper.py`, wired into `Analyzer.beats_and_downbeats`). `AIJOCKEY_BEAT_THIS=1` (default). Falls through to librosa. Need MI300X smoke to confirm phrase-grid drift gone.
+**1. Beat-This! integration** — DONE (`src/beat_this_wrapper.py`, wired into `Analyzer.beats_and_downbeats`). madmom DBN postprocessor active when madmom installed (CPJKU main 0.17.dev0+ builds on Py3.10). Falls through to librosa otherwise. **Validated**: madmom DBN gives correct 4:1 beats:downbeats ratio (test1: 282b/71db, ratio 3.97).
 
 **2. BS-Roformer for vocal stem** — SCAFFOLD DONE (`src/bs_roformer_wrapper.py`, `Analyzer._maybe_swap_vocals`). Opt-in: `AIJOCKEY_BS_ROFORMER=1` + `AIJOCKEY_BS_ROFORMER_CKPT=/path`. drums/bass/other still demucs. Need to download a vocals checkpoint + smoke.
 
-**GPU saturation pass** — DONE. GPU was 4% util; new batched-Demucs path (`stems_batch`), stage1 micro-batching (default 4 clips/forward), CLAP chunking, bumped `_RENDER_WORKERS` 2→6 + `_STEM_WORKERS` 4→8. Need MI300X `rocm-smi` watch on next run to measure lift.
+**GPU saturation pass** — DONE + VALIDATED. GPU was 4% util; new batched-Demucs path (`stems_batch`), stage1 micro-batching (default 4 clips/forward), CLAP chunking, bumped `_RENDER_WORKERS` 2→6 + `_STEM_WORKERS` 4→8. **Measured**: 95-100% GPU util peak during batched Demucs + Director on MI300X.
+
+**Probe + improver + cohort framework** — DONE this session.
+- `src/audio_probes.py` — RMS env / vocal-bleed xcorr / spectral phasing
+- `src/probe_log.py` — atomic JSONL append per render, summarize() by_cohort
+- `src/improver.py` — diagnose probes → TimelineEdit list, env-gated actions
+- `src/planner.py:repick_energy_constrained_segments` — energy_repick no longer stub
+- `scripts/run_baseline.sh` — 4-cohort cumulative ablation runner (A=off, B=E, C=E+O, D=E+O+S)
+- Probes wired into `/generate` `X-Probe` header + `cmd_execute` CLI
+- Cohort run kicked on MI300X: 80 rows ETA ~60 min
+
+**Composite library picker** — DONE.
+- Spotify-pattern two-stage: per-user-clip multi-query retrieval → composite re-rank (CLAP + Camelot key + BPM + outlier penalty) → mismatch gate (return [] when all scores < 0)
+- Verified: test1+test2 vs 103-clip lib → composite correctly identifies NO MATCH, returns []. CLAP-only forced disparate picks → 0.94 probe severity.
+
+**Tempo octave normalization** — DONE.
+- `src/tempo_octave.py` (teammate) wired into `analyze.beats_and_downbeats` + `execute.stretch_and_pitch`
+- Catches half/double-time tracker errors at analyze AND execute boundaries
+- Genre prior auto-detected from filename prefix
+
+**Constitutional `check_pool_coherence`** — DONE. Warn rule for stylistic outliers in timeline (centroid distance > 0.45).
 
 ### P1 — UX completion + observability
 

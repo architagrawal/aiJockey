@@ -65,6 +65,20 @@ Heavy work (**never** on the Space CPU for real generation): analyze, optional D
 | `AIJOCKEY_OPTIMIZER` | no | `lion` | `lion`/`sophia`/`adamw8bit`/`adamw`. |
 | `AIJOCKEY_PREF_METHOD` | no | `orpo` | Preference training method: `orpo`/`dpo`/`kto`. |
 | `AIJOCKEY_SCRATCH` | no | `/scratch` | Pipeline scratch root (S0–S9 stage queues). |
+| `AIJOCKEY_BEAT_THIS` | no | `1` | Beat-This! GPU joint beats+downbeats. Falls back to madmom DBN (preferred) or librosa heuristic. |
+| `AIJOCKEY_BEAT_THIS_DBN` | no | `auto` | `auto` picks DBN postprocessor when madmom importable, else minimal (with sanity guards). |
+| `AIJOCKEY_BEAT_THIS_CKPT` | no | `final0` | Beat-This! checkpoint name. |
+| `AIJOCKEY_BEAT_THIS_TEMPO_CAP` | no | `220.0` | Reject beat_this output above this BPM (sanity guard against minimal postprocessor over-detection). |
+| `AIJOCKEY_BS_ROFORMER` | no | `0` | Opt-in vocal stem swap to BS-Roformer / Mel-Band Roformer. Requires `_CKPT` path. |
+| `AIJOCKEY_BS_ROFORMER_CKPT` | no | `` | Path to BS-Roformer vocals checkpoint (.ckpt/.pth). |
+| `AIJOCKEY_BATCH_DEMUCS` | no | `1` | Stage 1 batched Demucs across N clips per forward (lifts MI300X GPU util from 4% → 95%). |
+| `AIJOCKEY_DEMUCS_BATCH` | no | `4` | Demucs micro-batch size for `Analyzer.stems_batch`. |
+| `AIJOCKEY_CLAP_CHUNK` | no | `32` | Chunk size for `get_audio_embedding_batch` to avoid OOM on 100+-clip batches. |
+| `AIJOCKEY_PROBE_LOG` | no | `/scratch/probes/log.jsonl` | Per-render JSONL append path for probe data + DPO accumulator. Falls back to `./probes_log.jsonl` on laptop. |
+| `AIJOCKEY_IMPROVER_ENERGY` | no | `1` | Probe-driven planner energy re-pick action (writes `_improver_repick` flag, planner re-picks via `repick_energy_constrained_segments`). |
+| `AIJOCKEY_IMPROVER_OVERLAP` | no | `1` | Probe-driven overlap-shorten action (halves `transition_in.bars` when phase_delta > 0.25). |
+| `AIJOCKEY_IMPROVER_SWAP` | no | `1` | Probe-driven vocal-suppress technique swap action (drum_break/filter_fade/eq_swap when xcorr > 0.45). |
+| `AIJOCKEY_COHORT` | no | `` | Human-readable cohort label stamped into probe_log row for A/B bucketing (e.g. `A`/`B`/`C`/`D`). |
 | `IDLE_FILE` | no | `/tmp/aijockey-last` | Touched on requests; optional external idle monitor. |
 
 Optional: `HF_HOME` / `TRANSFORMERS_CACHE` if the instance has a large disk for model cache.

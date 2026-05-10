@@ -1,7 +1,54 @@
 # AiJockey — Status, Progress, Plan, Bugs
 
 Snapshot of what works, what's broken, what's next.
-Last updated: 2026-05-09 (post Beat-This! + BS-Roformer scaffolding + GPU-util work on `best-output-pipeline`).
+Last updated: 2026-05-09 (post probes + cohort framework + improver loop + planner re-pick + composite library picker on `best-output-pipeline`).
+
+---
+
+## Session update — probes + improver + cohort baseline + composite picker (2026-05-09 night)
+
+End-to-end measurement framework now in place. Pipeline lifecycle:
+
+1. **Render** (CLI or `/generate`) → audio + timeline JSON
+2. **Probe** ([`src/audio_probes.py`](src/audio_probes.py)) — RMS env / vocal-bleed xcorr / spectral phasing per junction → severity 0..1
+3. **Log** ([`src/probe_log.py`](src/probe_log.py)) — atomic JSONL append with full Director plan + improver env state + per-junction probe scores. Path: `$AIJOCKEY_PROBE_LOG`.
+4. **Improver loop** ([`src/improver.py`](src/improver.py)) — diagnose probe → emit `TimelineEdit` list per artifact type:
+   - `vocal_bleed > 0.45` → swap to vocal-suppress technique (`AIJOCKEY_IMPROVER_SWAP`)
+   - `phase > 0.25` → halve overlap bars (`AIJOCKEY_IMPROVER_OVERLAP`)
+   - `db_diff > ±6` → planner re-pick segment with target energy (`AIJOCKEY_IMPROVER_ENERGY`)
+5. **Planner re-pick** ([`src/planner.py:repick_energy_constrained_segments`](src/planner.py)) — picks different segment from same clip matching energy target, excludes current idx so always returns a NEW choice.
+6. **Re-render → re-probe → log post-improvement severity per pass** (cmd_execute improver loop).
+7. **Cohort runner** ([`scripts/run_baseline.sh`](scripts/run_baseline.sh)) — 4 cohorts × 10 prompts × 2 seeds = 80 rows cumulative ablation (A=off, B=E, C=E+O, D=E+O+S). `python -m probe_log summary --by_cohort` reports.
+
+### Composite library picker (replaces CLAP-cosine-only)
+[`server/api.py:library_clip_paths_clap`] — Spotify/YouTube two-stage retrieval+rerank:
+- **Stage 1 (retrieval)**: per-user-clip CLAP cosine top-K → union dedupe (multi-query, fixes centroid-averaging blindness)
+- **Stage 2 (re-rank)**: composite score = α·CLAP + β·Camelot key bonus + γ·BPM proximity + δ·outlier penalty
+- **Stage 3 (gate)**: empty-return when ALL top scores < 0 (library has nothing close to user pool — surfaced as `X-Ingest-Warnings` instead of forcing bad picks)
+- Verified empirically: test1+test2 vs 103-clip /cache library → ALL composite scores negative (top -0.085) → correctly returns []. CLAP-only would have picked Indian fusion/Hindustani/Trance with positive scores (+0.06–0.10) and forced them in.
+
+### Tempo octave normalization
+[`src/tempo_octave.py`] (teammate) wired into `analyze.beats_and_downbeats` + `execute.stretch_and_pitch`. Catches half-time/double-time tracker errors (trap 130→65, dnb 174→87) before they corrupt BPM filters or cause 2× rubberband stretch artifacts. Genre prior auto-detected from filename prefix (`trap__`, `dnb__`, etc).
+
+### Constitutional `check_pool_coherence`
+Warn rule: computes CLAP centroid of clips in timeline, flags any > 0.45 cosine distance as stylistic outlier. Catches v6_libaug failure mode at validate time (forced disparate-genre inclusions).
+
+### Style-RAG corpus build helper
+[`scripts/build_style_rag_index.py`] — lightweight alternative to S3 stage. Reads any cache dir's `.npz` CLAP embeddings + builds the 3 files Director's `few_shot_block_for_director` reads (`clap.npy`, `clap_index.json`, `captions.json`). Optional `--captions` flag generates Qwen2-Audio captions per clip (slow, GPU).
+
+### A/B finding (10-row baseline on v6 disparate pool)
+- N=10 mean=0.946 p50=1.0 p90=1.0 — pool ceiling
+- OVERLAP-only A/B: mean delta +0.004 (noise) — phase-shorten can't fix energy mismatch (-3.26/+4.07 dB jumps dominate)
+- Energy_repick was a STUB before this session; now wired via `repick_energy_constrained_segments`. 4-cohort baseline running on droplet to measure cumulative ablation effect.
+
+### Files added/touched this session
+- NEW: `src/audio_probes.py`, `src/probe_log.py`, `src/improver.py`, `src/tempo_octave.py` (teammate), `scripts/baseline_renders.py`, `scripts/run_baseline.sh`, `scripts/build_style_rag_index.py`
+- MOD: `src/analyze.py` (tempo octave normalize on detected BPM + genre hint), `src/execute.py` (tempo octave wire + bumped workers), `src/main.py` (probe+improver loop in cmd_execute), `src/constitutional.py` (check_pool_coherence), `src/planner.py` (repick_energy_constrained_segments), `server/api.py` (composite picker + multi-query retrieval + mismatch gate + probe header + log_render call)
+
+### Open issues
+- Energy_repick effectiveness untested against full-cohort baseline (waiting for current run to finish — ~60 min ETA)
+- mix_mode/arc fields not flowing into probe_log rows (showing as "unknown" in by_mode/by_arc — need to read from card.json)
+- Planner-stage surgical re-render not built (current cascade re-renders whole timeline, ~30s vs ~5s for 1 segment)
 
 ---
 

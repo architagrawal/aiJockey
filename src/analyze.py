@@ -241,6 +241,20 @@ class Analyzer:
             tempo = 60.0 / float(np.median(ibis))
         else:
             tempo = 0.0
+        # Octave-normalize tempo into canonical [90, 180] band. Catches the
+        # half-time / double-time tracker errors (trap 130→65, dnb 174→87)
+        # before they propagate into BPM-band filters and stretch_and_pitch.
+        # Genre prior optional — caller can pass via attribute when known.
+        try:
+            from tempo_octave import normalize_tempo
+            genre_hint = getattr(self, '_current_genre_hint', None)
+            normalized = normalize_tempo(tempo, genre=genre_hint)
+            if normalized != tempo:
+                print(f"[analyze] tempo octave-normalize: "
+                      f"{tempo:.1f} → {normalized:.1f} (genre={genre_hint})")
+                tempo = normalized
+        except Exception:
+            pass
         return tempo, beats, downbeats
 
     def key_camelot(self, wav: torch.Tensor) -> tuple[str, float]:
@@ -329,6 +343,15 @@ class Analyzer:
     def analyze(self, path: str, clip_id: str, cache_dir: Path,
                 precomputed_clap: np.ndarray | None = None) -> ClipAnalysis:
         wav = self.load(path)
+        # Genre hint from filename prefix (chillstep__/dnb__/trap__/...) —
+        # used by tempo_octave.normalize_tempo to widen canonical band for
+        # genres with non-standard tempo conventions (dnb 165-185 ok).
+        try:
+            stem = Path(path).stem.lower()
+            genre = stem.split('__')[0] if '__' in stem else None
+            self._current_genre_hint = genre
+        except Exception:
+            self._current_genre_hint = None
         # Stems (slow). If caller pre-batched stems via stems_batch() and
         # parked them on `_pre_stems`, reuse — saves the per-clip GPU forward
         # which is the largest single cost on stage1.
