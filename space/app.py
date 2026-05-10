@@ -79,7 +79,10 @@ def update_duration_bounds(files, use_library):
 
 def call_backend(files, preset_label, duration, use_library,
                  advanced_on, custom_prompt, custom_arc, seed, lufs_label,
-                 export_label):
+                 export_label,
+                 oauth_profile: gr.OAuthProfile | None = None,
+                 progress=gr.Progress()):
+    progress(0.02, desc="validating...")
     if not MI300X_URL or not MI300X_KEY:
         return None, "Backend not configured. Set MI300X_URL + MI300X_KEY in Space secrets."
     if not files:
@@ -116,8 +119,11 @@ def call_backend(files, preset_label, duration, use_library,
                 pass
 
     headers = {"X-Key": MI300X_KEY}
+    if oauth_profile is not None:
+        headers["X-User-Id"] = str(getattr(oauth_profile, "username", "anon"))[:64]
     suf = {"mp3": ".mp3", "wav": ".wav", "flac": ".flac"}.get(
         EXPORT_FORMATS.get(export_label, "mp3"), ".mp3")
+    progress(0.08, desc="uploading clips to GPU...")
     try:
         r = requests.post(
             f"{MI300X_URL}/generate",
@@ -131,6 +137,7 @@ def call_backend(files, preset_label, duration, use_library,
     if r.status_code != 200:
         return None, f"Error {r.status_code}: {r.text[:400]}"
 
+    progress(0.95, desc="finalizing audio...")
     job_ref = r.headers.get("X-Job-Id", "")
     warn = r.headers.get("X-Ingest-Warnings")
     probe_hdr = r.headers.get("X-Probe", "")
@@ -184,6 +191,25 @@ def health_check():
         return f"Backend unreachable: {e}"
 
 
+def backend_status_banner() -> str:
+    """One-line live status for the Try It tab. Polled on tab load."""
+    if not MI300X_URL:
+        return "🔴 **Backend not configured.** Demo tab still works."
+    try:
+        r = requests.get(f"{MI300X_URL}/health", timeout=4)
+        if not r.ok:
+            return f"🔴 **Backend down** (HTTP {r.status_code}). Try Demo tab."
+        h = r.json()
+        inflight = h.get("inflight_count", 0)
+        cap = h.get("inflight_max", 1)
+        gpu_busy = h.get("gpu_busy", False)
+        gpu_lbl = "GPU busy" if gpu_busy else "GPU idle"
+        return (f"🟢 **Live** — {gpu_lbl}, queue {inflight}/{cap}, "
+                f"disk {h.get('disk_free_gb', '?')} GB free.")
+    except Exception as e:
+        return f"🔴 **Unreachable**: {str(e)[:120]}. Demo tab still works."
+
+
 with gr.Blocks(title="AiJockey", theme=gr.themes.Soft()) as app:
     gr.Markdown("# AiJockey — open-source AI DJ\n"
                 "Stems → beats → CLAP → planner → mastered mix. AGPL-3.0. "
@@ -204,16 +230,27 @@ with gr.Blocks(title="AiJockey", theme=gr.themes.Soft()) as app:
                         gr.Markdown(f"_Pending render: `{slug}.mp3`_")
 
     with gr.Tab("Try It"):
+        status_banner = gr.Markdown(backend_status_banner())
+        refresh_status = gr.Button("Refresh status", size="sm")
+        refresh_status.click(backend_status_banner, None, status_banner)
+
         with gr.Group(visible=True) as gate:
-            gr.Markdown("### Live generation (password required)\n"
-                        "Burns MI300X credits. Owner only.")
-            pw = gr.Textbox(type="password", label="Admin password")
-            unlock = gr.Button("Unlock")
+            gr.Markdown("### Live generation\n"
+                        "Sign in with Hugging Face OR enter admin password. "
+                        "MI300X serves up to 4 concurrent jobs; GPU stages serialize.")
+            try:
+                login_btn = gr.LoginButton()
+            except Exception:
+                login_btn = None  # OAuth disabled in local dev
+            pw = gr.Textbox(type="password",
+                            label="Admin password (fallback when not signed in)")
+            unlock = gr.Button("Unlock with password", variant="secondary")
             err = gr.Markdown()
         with gr.Group(visible=False) as panel:
             gr.Markdown(
                 f"Upload **{MIN_CLIPS}–{MAX_CLIPS}** audio clips (wav/mp3/flac/m4a/ogg, **≤25 MB** each). "
-                f"Target mix **≤{MAX_DURATION_HARD // 60} min** wall clock; backend may return **503** if busy (one GPU job) or **504** if generation exceeds **~{BACKEND_TIMEOUT_SEC // 60} min**."
+                f"Target mix **≤{MAX_DURATION_HARD // 60} min** wall clock. Backend serves up to 4 jobs in parallel "
+                f"(GPU stages serialize); **503** when full → retry, **504** if generation exceeds **~{BACKEND_TIMEOUT_SEC // 60} min**."
             )
             files = gr.File(file_count="multiple", file_types=["audio"],
                             label=f"Your clips ({MIN_CLIPS}-{MAX_CLIPS})")
@@ -253,12 +290,28 @@ with gr.Blocks(title="AiJockey", theme=gr.themes.Soft()) as app:
             out_audio = gr.Audio(label="Output mix")
             status = gr.Markdown()
 
+            # concurrency_id="gpu_job" + concurrency_limit=4 lets Gradio
+            # queue cap parallel calls to the backend at INFLIGHT_MAX.
+            # Position is auto-broadcast to waiting users; reconnect on drop.
             generate.click(call_backend,
                            [files, preset, duration, use_library,
                             advanced_on, custom_prompt, custom_arc, seed, lufs, export_fmt],
-                           [out_audio, status])
+                           [out_audio, status],
+                           concurrency_id="gpu_job",
+                           concurrency_limit=4)
 
         unlock.click(check_pw, pw, [panel, gate, err])
+
+        # HF OAuth: when signed-in user lands on tab, auto-unlock panel.
+        def _oauth_unlock(profile: gr.OAuthProfile | None):
+            if profile is None:
+                return gr.update(), gr.update(), ""
+            return (gr.update(visible=True), gr.update(visible=False),
+                    f"Signed in as **{profile.username}**.")
+        try:
+            app.load(_oauth_unlock, None, [panel, gate, err])
+        except Exception:
+            pass
 
     with gr.Tab("How it works"):
         gr.Markdown("""
@@ -272,4 +325,7 @@ Repo: [github.com/architagrawal/aiJockey](https://github.com/architagrawal/aiJoc
 """)
 
 if __name__ == "__main__":
-    app.launch()
+    # Queue: lets multiple users wait without dropping; broadcasts position;
+    # reconnects on socket drop. default_concurrency_limit=4 matches backend
+    # INFLIGHT_MAX so we don't pile up waiters past backend capacity.
+    app.queue(max_size=20, default_concurrency_limit=4).launch()

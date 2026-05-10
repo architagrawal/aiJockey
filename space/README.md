@@ -9,6 +9,10 @@ app_file: app.py
 pinned: false
 license: agpl-3.0
 short_description: Open-source AI DJ. 5 wildly different mixes, same engine.
+hf_oauth: true
+hf_oauth_scopes:
+  - openid
+  - profile
 ---
 
 # AiJockey HF Space
@@ -32,7 +36,7 @@ These mirror [server/api.py](../server/api.py):
 | Clip count | 2–8 |
 | Each file | ≤ 25 MB; extensions `.wav` `.mp3` `.flac` `.m4a` `.ogg` |
 | Requested duration | 30–600 s (slider max may be shorter without **Use sample library**) |
-| One GPU job | `503` if backend busy; retry after ~2 min |
+| Concurrent jobs | up to `AIJOCKEY_INFLIGHT_MAX` (default 4); GPU stages (analyze + Director) serialize via `_gpu_lock`. `503` when slot pool full; retry after ~2 min |
 | Job wall clock | backend default **1200 s** (`AIJOCKEY_JOB_TIMEOUT_SEC`) |
 | Downloads | MP3 default; WAV/FLAC optional (Try It dropdown) |
 
