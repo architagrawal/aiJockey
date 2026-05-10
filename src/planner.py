@@ -268,18 +268,76 @@ def pick_segment(clip: dict, prefer: str | None = None,
                  target_energy: float | None = None,
                  exclude_indices: set | None = None,
                  min_seconds: float = 30.0,
-                 prefer_instrumental: bool = False) -> tuple[dict, int]:
+                 prefer_instrumental: bool = False,
+                 prev_meta: dict | None = None,
+                 target_bpm: float | None = None,
+                 target_key: str | None = None,
+                 transition_type: str | None = None,
+                 ) -> tuple[dict, int]:
     """
     Returns (segment_dict, segment_index). Filters sections shorter than
     min_seconds. Falls back to longest available if all too short.
 
     prefer_instrumental: when set, deprioritize vocal-active sections
     (uses cached vocal_activity field if present, else section.type heuristic).
+
+    Tier-1 follow-up H: when AIJOCKEY_CANDIDATE_PICKER=1 AND clip has
+    All-In-One section labels (chorus/verse/break/...), score 3-5
+    candidates with multi-factor weights (energy match + transition-type
+    fit + vocal/key/bpm penalties + duration). Falls through to legacy
+    energy/type heuristic on miss.
     """
     sections = clip.get('sections', [])
     if not sections:
         return ({'start': 0.0, 'end': clip.get('duration', 30.0),
                  'type': 'unknown', 'energy': 0.5}, -1)
+    # Candidate-scored picker (Tier-1 H). Only fires when env enabled AND
+    # sections carry functional labels (i.e. came from All-In-One, not
+    # MFCC clustering). Returns None silently → legacy logic below runs.
+    try:
+        from candidate_picker import (
+            enabled as _picker_enabled,
+            build_candidates as _picker_build,
+            pick_best_junction as _picker_pick,
+        )
+        # Trigger only when at least one section carries a functional label.
+        if _picker_enabled() and any(
+            'label' in s and s.get('source') == 'all_in_one' for s in sections
+        ):
+            cands = _picker_build(clip, sections,
+                                   min_seconds=min_seconds,
+                                   max_seconds=60.0)
+            # Maintain exclude_indices contract — drop already-picked starts.
+            if exclude_indices:
+                cands = [c for i, c in enumerate(cands)
+                         if i not in exclude_indices]
+            if cands:
+                best = _picker_pick(
+                    prev_meta or {}, cands,
+                    target_bpm=target_bpm,
+                    target_key=target_key,
+                    target_energy=target_energy,
+                    transition_type=transition_type or '',
+                )
+                if best is not None:
+                    # Find original section index for exclude tracking
+                    for i, s in enumerate(sections):
+                        if (abs(float(s.get('start', 0)) - best['start']) < 0.5
+                                and s.get('label') == best['label']):
+                            seg = {
+                                'start': best['start'],
+                                'end': best['end'],
+                                'type': best['label'],
+                                'energy': best['energy'],
+                                'picker_score': best['score'],
+                                'picker_breakdown': best['breakdown'],
+                            }
+                            if 'vocal_activity' in s:
+                                seg['vocal_activity'] = s['vocal_activity']
+                            return (seg, i)
+    except Exception as _e:
+        # Picker import / shape issue — fall through silently to legacy.
+        pass
     exclude = exclude_indices or set()
     # Filter sections by min duration
     long_enough = [(i, s) for i, s in enumerate(sections)
