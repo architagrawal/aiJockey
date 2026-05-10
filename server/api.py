@@ -666,6 +666,82 @@ def ready():
     return {"status": "ready", "disk_free_gb": disk_free_gb()}
 
 
+@app.get("/jobs/{job_id}/timeline")
+def job_timeline(job_id: str,
+                 x_key: str | None = Header(default=None, alias="X-Key")):
+    """Return segment-level timeline with user-clip filenames + transition names.
+
+    Library clips redacted to `library` to avoid leaking pre-baked corpus IDs.
+    Used by HF Space to render colored timeline bar under the audio player.
+    """
+    check_key(x_key)
+    job_root = RESULTS_DIR / job_id
+    tl_p = job_root / "timeline.json"
+    if not tl_p.exists():
+        raise HTTPException(404, detail="timeline not found")
+    try:
+        blob = json.loads(tl_p.read_text())
+    except Exception as e:
+        raise HTTPException(500, detail=f"timeline parse failed: {e}")
+
+    cache_dir = job_root / "cache"
+    pool_dir = job_root / "clips"
+    upload_map_path = pool_dir / "_uploads.json"
+    digest_to_filename: dict[str, str] = {}
+    try:
+        if upload_map_path.exists():
+            for row in json.loads(upload_map_path.read_text()):
+                digest_to_filename[row["digest"]] = row.get("filename", row["digest"])
+    except Exception:
+        pass
+
+    tl = blob.get("timeline", []) if isinstance(blob, dict) else blob
+    segments = []
+    cursor_sec = 0.0
+    user_index: dict[str, int] = {}
+
+    for entry in tl:
+        cid = entry.get("clip_id", "")
+        seg = entry.get("segment", {}) or {}
+        start = float(seg.get("start", 0.0))
+        end = float(seg.get("end", 0.0))
+        seg_dur = max(0.0, end - start)
+        cj = cache_dir / f"{cid}.json"
+        source = "?"
+        label = "library"
+        filename: str | None = None
+        if cj.exists():
+            try:
+                cm = json.loads(cj.read_text())
+                source = (cm.get("source") or "").lower() or "?"
+            except Exception:
+                pass
+        if source == "user":
+            fname = digest_to_filename.get(cid, cid)
+            if fname not in user_index:
+                user_index[fname] = len(user_index) + 1
+            label = f"user_{user_index[fname]}"
+            filename = fname
+        transition = (entry.get("transition_in") or {}).get("name", "?")
+        segments.append({
+            "start_sec": round(cursor_sec, 2),
+            "duration_sec": round(seg_dur, 2),
+            "source": source,
+            "label": label,
+            "filename": filename,
+            "transition": transition,
+            "tier": (entry.get("transition_in") or {}).get("tier"),
+        })
+        cursor_sec += seg_dur
+
+    return {
+        "job_id": job_id,
+        "total_duration_sec": round(cursor_sec, 2),
+        "n_user_clips": len(user_index),
+        "segments": segments,
+    }
+
+
 @app.get("/library/info")
 def library_info():
     paths = library_clip_paths(limit=10**6)
@@ -732,6 +808,7 @@ def _run_generate_sync(
     saved_paths: list[Path] = []
     ingest_warnings: list[str] = []
 
+    upload_map: list[dict] = []
     for fname, data in files_payload:
         if not data:
             raise ValueError(f"empty file: {fname}")
@@ -745,10 +822,16 @@ def _run_generate_sync(
         sp = pool_dir / f"{digest}{ext}"
         sp.write_bytes(data)
         saved_paths.append(sp)
+        upload_map.append({"digest": digest, "filename": fname or f"{digest}{ext}"})
         if ext == ".mp3":
             kbps = probe_mp3_bitrate_kbps(sp)
             if kbps is not None and kbps < 160:
                 ingest_warnings.append(f"{fname}: low MP3 bitrate ~{kbps} kbps; lossless/WAV improves mix quality.")
+    # Sidecar: stem→filename map for /jobs/{id}/timeline source-label rendering.
+    try:
+        (pool_dir / "_uploads.json").write_text(json.dumps(upload_map))
+    except Exception:
+        pass
 
     durations = [audio_duration_seconds(p) for p in saved_paths]
     total_user_duration = sum(durations)
