@@ -10,7 +10,7 @@ AiJockey is an **offline-first DJ pipeline**: upload a pool of tracks → analyz
 
 | Role | Implementation |
 |------|----------------|
-| **Director** | [`src/director.py`](src/director.py): small HF **instruct** LM produces JSON (`arc`, `text_prompt`, budgets, **`transition_tiers`** `major`\|`minor`, optional **`accent_hints`**). Disabled with `AIJOCKEY_USE_DIRECTOR_LLM=0` → deterministic fallback JSON. |
+| **Director** | [`src/director.py`](src/director.py): HF **instruct** LM (Qwen2-Audio-7B / Qwen2.5-7B / SmolLM2) produces JSON (`arc`, `text_prompt`, budgets, **`transition_tiers`**, optional **`accent_hints`**). Tier vocab: full = `minor`\|`major`\|`drop`\|`cut`\|`loop`. Phase 1 (`AIJOCKEY_PHASE=1`, default) restricts to `minor`\|`major`\|`drop`; `cut`/`loop` downgrade to `major`. Disabled with `AIJOCKEY_USE_DIRECTOR_LLM=0` → deterministic fallback JSON. |
 | **Tier → DSP** | [`src/transition_mapping.py`](src/transition_mapping.py): maps LLM tiers to concrete `transition_in` dicts consumed by [`src/execute.py`](src/execute.py). Planner’s rule-based technique choice is **replaced** after `plan()` for junctions ≥ 1. |
 | **Genre / cohesion** | [`src/planner.py`](src/planner.py): `compute_pool_coherence()` from CLAP; high coherence tightens key/tempo weights (`PlannerConfig.pool_coherence`, `same_genre_tight_mix`). Timeline **`meta.max_stretch_ratio`** caps rubberband BPM ratio in execute (stricter when pool is heterogeneous). |
 | **Accents** | Optional `accent_hint` on timeline entries; execute overlays samples at transition exits via `_overlay_accent_hint`. |
@@ -41,7 +41,18 @@ Heavy work (**never** on the Space CPU for real generation): analyze, optional D
 | `AI_DEVICE` | no | `cuda` | On ROCm PyTorch still use `cuda` string. |
 | `AIJOCKEY_JOB_TIMEOUT_SEC` | no | `1200` | Wall-clock ceiling for one job (asyncio `wait_for` around the worker thread). Returns **504** if exceeded. |
 | `AIJOCKEY_USE_DIRECTOR_LLM` | no | `1` | Set `0` to skip HF LLM load (faster cold start; fallback JSON). |
-| `HF_DIRECTOR_MODEL` | no | `HuggingFaceTB/SmolLM2-360M-Instruct` | First request downloads weights; ensure disk and HF access. |
+| `HF_DIRECTOR_MODEL` | no | `Qwen/Qwen2.5-7B-Instruct` | First request downloads weights; ensure disk and HF access. Use `Qwen/Qwen2-Audio-7B-Instruct` for multimodal (audio-aware) Director. |
+| `AIJOCKEY_PHASE` | no | `1` | `1` = Phase A polish (3-tier vocab, sample whitelist, stem-swap on); `2` = full vocab + meme samples. |
+| `AIJOCKEY_PHRASE_QUANTIZE` | no | `1` | Snap segment boundaries to clip downbeats grid. |
+| `AIJOCKEY_STEM_SWAP` | no | `1` | Stem-additive overlap path (eliminates subtractive vocal-mute phasing). |
+| `AIJOCKEY_CONSTITUTIONAL` | no | `1` | Hard musical-rule validator + auto-repair on violations. |
+| `AIJOCKEY_DTYPE` | no | `bfloat16` | Mixed precision dtype for training/inference. |
+| `AIJOCKEY_COMPILE` | no | `1` | torch.compile on model forward paths. |
+| `AIJOCKEY_FLASH_ATTN` | no | `2` | HF transformers `attn_implementation`: `0`=eager, `1`=sdpa, `2`=flash_attention_2. |
+| `AIJOCKEY_QLORA` | no | `0` | 4-bit QLoRA load for big-model fine-tune (turn on for 72B Director DPO). |
+| `AIJOCKEY_OPTIMIZER` | no | `lion` | `lion`/`sophia`/`adamw8bit`/`adamw`. |
+| `AIJOCKEY_PREF_METHOD` | no | `orpo` | Preference training method: `orpo`/`dpo`/`kto`. |
+| `AIJOCKEY_SCRATCH` | no | `/scratch` | Pipeline scratch root (S0–S9 stage queues). |
 | `IDLE_FILE` | no | `/tmp/aijockey-last` | Touched on requests; optional external idle monitor. |
 
 Optional: `HF_HOME` / `TRANSFORMERS_CACHE` if the instance has a large disk for model cache.

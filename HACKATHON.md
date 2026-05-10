@@ -120,9 +120,13 @@ Phase C (target): full DJ LLM with streaming runtime
 ### Slide 4 — What's "AI" in current system
 - CLAP embeddings — audio→512-dim semantic vectors (LAION pretrained)
 - Demucs neural stem separation
-- madmom RNN beat tracking
+- librosa beat tracking + heuristic downbeats (madmom dropped — Python 3.10 incompat)
 - Trained MLP technique classifier (Tier 1, optional toggle)
-- Self-supervised pretraining roadmap
+- Trained CLAP compatibility head (Tier 1.5)
+- Trained mix critic (Tier 2)
+- Multimodal Qwen2-Audio Director — hears clips before producing JSON plan
+- Phase A polish: phrase quantization + stem-additive overlap + humanized accents + constitutional validator
+- Roadmap: ORPO LoRA Director + MusicGen-Small bridge fine-tune (Phase B start)
 
 ### Slide 5 — Live demo
 1. Upload 5 EDM clips
