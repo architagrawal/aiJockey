@@ -9,12 +9,32 @@ Toggled via PlannerConfig.restricted = True or --restricted CLI flag.
 """
 from __future__ import annotations
 
-# Demo-safe technique whitelist (drops pitch_bend, scratch_fill, spinback —
-# these need rubberband tuning + stem alignment we haven't shipped yet).
+# Demo-safe technique whitelist. Per docs/dj_research.md §6+§10, all
+# frequency-band swaps, filter sweeps, stem swaps, echoes, and overlays
+# are safe even over vocals. Excluded: time/pitch warps + per-sample
+# manipulation (pitch_bend, scratch_fill, spinback, beat_juggle, chop,
+# loop_roll, spectral_hold, tape_stop, bpm_warp, forward_spin) — these
+# need rubberband tuning + stem alignment we haven't shipped yet.
 DEMO_SAFE_TECHNIQUES = [
-    'cut', 'crossfade', 'eq_swap', 'filter_fade', 'silence_drop',
-    'drum_break', 'mashup', 'stem_swap', 'echo_out',
-    'loop_tighten', 'loop_callback', 'fade_in',
+    # Crossfade variants
+    'crossfade', 'short_crossfade', 'long_crossfade',
+    # Frequency-band swaps (vocal-safe)
+    'eq_swap', 'bass_swap', 'highs_swap', 'frequency_blend',
+    # Filter sweeps
+    'filter_fade', 'highpass_sweep_in', 'band_filter_sweep',
+    # Cuts + drops
+    'cut', 'punch_in', 'silence_drop', 'fade_in',
+    # Drum manipulations (vocal-compatible)
+    'drum_break', 'kickless_swap', 'drum_replace',
+    # Stem-aware (vocal-compatible by design)
+    'stem_swap', 'instrumental_swap', 'mashup', 'acapella_drop',
+    # Echo / reverb / harmonic overlays
+    'echo_out', 'reverb_wash', 'harmonic_overlay',
+    'riser_overlay', 'impact_overlay',
+    # Loops (vocal-safe variants)
+    'loop_tighten', 'loop_callback',
+    # Bridge / build
+    'snare_buildup', 'build_riser_drop',
 ]
 
 # Multi-genre restricted scope
