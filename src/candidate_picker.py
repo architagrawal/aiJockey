@@ -131,7 +131,9 @@ def build_candidates(clip_meta: dict, sections: list[dict] | None = None,
                       preferred_min_seconds: float = 20.0,
                       hard_min_seconds: float = 8.0,
                       exclude_indices: set | None = None,
-                      downbeats: list[float] | None = None) -> list[dict]:
+                      downbeats: list[float] | None = None,
+                      rms_at_time=None,
+                      snap_rms_tolerance: float = 0.10) -> list[dict]:
     """Build candidate junctions from a clip's labeled sections.
 
     Output dict keys: start, end, label, canonical_label, energy,
@@ -161,10 +163,33 @@ def build_candidates(clip_meta: dict, sections: list[dict] | None = None,
     snap_drift_max = 2.0 * bar_dur
 
     def _snap(t: float) -> float:
+        """Phrase-snap with RMS-quality gate (#10).
+
+        Snap to nearest downbeat within ±2 bars. When `rms_at_time`
+        callable provided, only apply snap when the snapped position's
+        RMS is within `snap_rms_tolerance` of the original — avoids
+        snapping into a quiet bar (which would inject jitter rather
+        than fixing it).
+        """
         if not downbeats:
             return t
         nearest = min(downbeats, key=lambda d: abs(d - t))
-        return float(nearest) if abs(nearest - t) <= snap_drift_max else t
+        if abs(nearest - t) > snap_drift_max:
+            return t
+        if rms_at_time is not None:
+            try:
+                r_orig = float(rms_at_time(t))
+                r_snap = float(rms_at_time(nearest))
+                if r_orig > 1e-6:
+                    rel = abs(r_snap - r_orig) / r_orig
+                    if rel > snap_rms_tolerance:
+                        # Snapping would land on a much quieter / louder
+                        # moment — skip the snap, keep original boundary.
+                        return t
+            except Exception:
+                # On any rms callable failure, fall back to plain snap
+                pass
+        return float(nearest)
 
     candidates: list[dict] = []
     for i, s in enumerate(sections):
@@ -277,6 +302,9 @@ def score_candidate(cand: dict, prev_meta: dict, *,
                     target_energy: float | None = None,
                     transition_type: str = '',
                     next_transition_type: str = '',
+                    rationale_emb: 'np.ndarray | None' = None,    # noqa: F821
+                    cand_clap: 'np.ndarray | None' = None,        # noqa: F821
+                    prev_seg_end_energy: float | None = None,
                     weights: dict | None = None) -> tuple[float, dict]:
     """Multi-factor score in roughly [-3, +3] range. Higher = better.
 
@@ -358,13 +386,46 @@ def score_candidate(cand: dict, prev_meta: dict, *,
     if dp > 0:
         dur_contrib -= dp     # subtract penalty (0..1) from contribution
 
+    # 7. Director rationale match (#7) — CLAP-cosine of candidate vs
+    #    Director's intent string embedding. Cheap, leverages CLAP. When
+    #    rationale_emb / cand_clap absent → 0 contribution.
+    rationale_contrib = 0.0
+    if rationale_emb is not None and cand_clap is not None:
+        try:
+            import numpy as _np
+            r = _np.asarray(rationale_emb, dtype=_np.float32)
+            c_emb = _np.asarray(cand_clap, dtype=_np.float32)
+            rn = float(_np.linalg.norm(r))
+            cn = float(_np.linalg.norm(c_emb))
+            if rn > 0 and cn > 0:
+                cos = float((r / rn) @ (c_emb / cn))
+                # cos ∈ [-1, 1] → contrib ∈ [-1, 1]
+                rationale_contrib = max(-1.0, min(1.0, cos))
+        except Exception:
+            rationale_contrib = 0.0
+
+    # 8. Boundary-energy continuity (#11) — different from #1 (mean energy
+    #    match). Penalizes jarring level jumps at the JUNCTION POINT.
+    boundary_contrib = 0.0
+    if prev_seg_end_energy is not None:
+        cand_start_energy = float(cand.get('energy', 0.5))
+        # Approximate start energy with section's mean energy; downstream
+        # callers can override by passing a more accurate `start_energy` field.
+        if 'start_energy' in cand and isinstance(cand['start_energy'], (int, float)):
+            cand_start_energy = float(cand['start_energy'])
+        gap = abs(float(prev_seg_end_energy) - cand_start_energy)
+        # 0 gap → +0.5; 0.5 gap → -0.5; >0.5 gap → -1
+        boundary_contrib = max(-1.0, 0.5 - gap)
+
     breakdown = {
-        'energy':   round(w['energy']   * e_contrib, 3),
-        'type_fit': round(w['type_fit'] * fit_contrib, 3),
-        'vocal':    round(w['vocal']    * vocal_contrib, 3),
-        'key':      round(w['key']      * key_contrib, 3),
-        'bpm':      round(w['bpm']      * bpm_contrib, 3),
-        'duration': round(w['duration'] * dur_contrib, 3),
+        'energy':    round(w['energy']    * e_contrib, 3),
+        'type_fit':  round(w['type_fit']  * fit_contrib, 3),
+        'vocal':     round(w['vocal']     * vocal_contrib, 3),
+        'key':       round(w['key']       * key_contrib, 3),
+        'bpm':       round(w['bpm']       * bpm_contrib, 3),
+        'duration':  round(w['duration']  * dur_contrib, 3),
+        'rationale': round(w.get('rationale', 1.0) * rationale_contrib, 3),
+        'boundary':  round(w.get('boundary', 0.7) * boundary_contrib, 3),
     }
     score = sum(breakdown.values())
     return score, breakdown
@@ -376,15 +437,22 @@ def pick_best_junction(prev_meta: dict, candidates: list[dict], *,
                        target_energy: float | None = None,
                        transition_type: str = '',
                        next_transition_type: str = '',
+                       rationale_emb=None,
+                       cand_claps: list | None = None,
+                       prev_seg_end_energy: float | None = None,
                        weights: dict | None = None,
                        min_score: float | None = None,
                        ) -> dict | None:
-    """Score all candidates, return the highest-scoring (with breakdown
-    + ranks attached). Returns None when no candidates OR best score
-    below min_score threshold.
+    """Score all candidates, return the highest-scoring.
 
-    Output dict (when not None):
-        {**candidate_fields, 'score': float, 'breakdown': dict, 'rank': 1, 'all_scores': [...]}
+    `rationale_emb` (#7): CLAP-text embedding of Director's intent. When
+    provided alongside per-candidate `cand_claps[i]` (parallel list to
+    `candidates`), each candidate's CLAP-text cosine vs rationale becomes
+    a scoring factor.
+
+    `prev_seg_end_energy` (#11): boundary energy of previous segment.
+    Picker scores boundary-energy continuity (smaller jumps = better)
+    in addition to mean-energy match.
     """
     if min_score is None:
         min_score = float(os.environ.get('AIJOCKEY_PICKER_MIN_SCORE', '0.0'))
@@ -392,7 +460,10 @@ def pick_best_junction(prev_meta: dict, candidates: list[dict], *,
         return None
 
     scored = []
-    for c in candidates:
+    for i, c in enumerate(candidates):
+        cand_clap_i = None
+        if cand_claps is not None and i < len(cand_claps):
+            cand_clap_i = cand_claps[i]
         s, b = score_candidate(
             c, prev_meta,
             target_bpm=target_bpm,
@@ -400,6 +471,9 @@ def pick_best_junction(prev_meta: dict, candidates: list[dict], *,
             target_energy=target_energy,
             transition_type=transition_type,
             next_transition_type=next_transition_type,
+            rationale_emb=rationale_emb,
+            cand_clap=cand_clap_i,
+            prev_seg_end_energy=prev_seg_end_energy,
             weights=weights,
         )
         scored.append((s, b, c))
@@ -423,12 +497,15 @@ def pick_best_junction(prev_meta: dict, candidates: list[dict], *,
 
 def _weights(override: dict | None = None) -> dict[str, float]:
     base = {
-        'energy':   float(os.environ.get('AIJOCKEY_PICKER_W_ENERGY',   '1.0')),
-        'type_fit': float(os.environ.get('AIJOCKEY_PICKER_W_TYPE_FIT', '1.5')),
-        'vocal':    float(os.environ.get('AIJOCKEY_PICKER_W_VOCAL',    '1.0')),
-        'key':      float(os.environ.get('AIJOCKEY_PICKER_W_KEY',      '1.2')),
-        'bpm':      float(os.environ.get('AIJOCKEY_PICKER_W_BPM',      '0.8')),
-        'duration': float(os.environ.get('AIJOCKEY_PICKER_W_DURATION', '0.5')),
+        'energy':    float(os.environ.get('AIJOCKEY_PICKER_W_ENERGY',    '1.0')),
+        'type_fit':  float(os.environ.get('AIJOCKEY_PICKER_W_TYPE_FIT',  '1.5')),
+        'vocal':     float(os.environ.get('AIJOCKEY_PICKER_W_VOCAL',     '1.0')),
+        'key':       float(os.environ.get('AIJOCKEY_PICKER_W_KEY',       '1.2')),
+        'bpm':       float(os.environ.get('AIJOCKEY_PICKER_W_BPM',       '0.8')),
+        'duration':  float(os.environ.get('AIJOCKEY_PICKER_W_DURATION',  '0.5')),
+        # Closed-loop factors (#7, #11)
+        'rationale': float(os.environ.get('AIJOCKEY_PICKER_W_RATIONALE', '1.0')),
+        'boundary':  float(os.environ.get('AIJOCKEY_PICKER_W_BOUNDARY',  '0.7')),
     }
     if override:
         base.update(override)
