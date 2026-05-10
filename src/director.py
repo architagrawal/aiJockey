@@ -218,6 +218,42 @@ Pool: 5 lofi clips at 80-90 BPM
 User: "after-hours"
 Output:
 {"arc":"flat_low","set_narrative":"sustained lo-fi ambient hypnosis","narrative_notes":"pool is tight lofi cluster — no major/drop needed, all minor blends","text_prompt":"after-hours lofi","surprise_budget":1,"callback_budget":0,"transition_tiers":["minor","minor","minor","minor"],"transition_intents":["breath","smooth_continue","smooth_continue","cooldown"],"accent_hints":[],"same_genre_tight_mix":true}
+
+Pool: 4 vocal pop (Despacito/Taki/Stars/Waka) + 4 instrumental electronic (cinematic, electrodoodle)
+User: "vocal-forward journey, varied transitions welcome"
+Reasoning: pool mixes vocal pop with instrumental cinematic. Use instrumental
+clips as build-up + drop-payoff slots (their drop sections won't fight vocals).
+Multi-peak structure: open mellow → first peak (drop into vocal hook) → valley
+→ bigger second peak (instrumental drop) → callback to opener vibe.
+Output:
+{"arc":"build","set_narrative":"layered vocal-pop journey with two peak moments anchored by instrumental drops","narrative_notes":"pool supports build-drop-recovery-bigger-drop. Reserve drop tier for inst→inst junctions where vocal_guard won't clamp.","text_prompt":"vocal-forward festival journey","surprise_budget":3,"callback_budget":2,"transition_tiers":["minor","major","minor","drop","major","minor","drop","major","minor","minor","major"],"transition_intents":["breath","genre_jump","smooth_continue","drop_payoff","build_tension","callback","drop_payoff","genre_jump","callback","smooth_continue","cooldown"],"accent_hints":[{"junction_index":2,"fx_category":"snare_rolls","beats":4.0},{"junction_index":3,"fx_category":"impacts","beats":1.0},{"junction_index":5,"fx_category":"risers","beats":8.0},{"junction_index":6,"fx_category":"impacts","beats":1.0}],"same_genre_tight_mix":false}
+
+NARRATIVE-DRIVEN STRUCTURE (Tomorrowland-grade per docs/dj_research.md):
+A real DJ set isn't a flat parade of crossfades. It has SHAPE:
+  • Opener: low energy, room-reading. (1-2 minor + breath/smooth_continue)
+  • First climb: tension building (1-2 major with build_tension intent)
+  • First peak: drop or major-into-hook (1 drop OR major with drop_payoff)
+  • Recovery valley: breakdown / breath section (1-2 minor with breath)
+  • Bigger climb: more aggressive techniques (loop_tighten, drum_break)
+  • Main peak: drop tier with riser+impact accents (the festival moment)
+  • Callbacks during recovery: revisit earlier clip (callback intent)
+  • Outro: cooldown back to minor (gentle exit)
+ENERGY ARC IS NOT LINEAR. Use valleys deliberately to make peaks feel bigger.
+
+WHEN TO PICK DROP TIER (the climax moment):
+  • Pool has at least 1 clip with section type 'drop' / 'chorus' / 'hook'
+  • Junction lands at 50-80% through the set (peak zone)
+  • Both adjacent clips are instrumental-friendly (vocal_guard won't clamp)
+  • Pair with riser accent BEFORE + impact accent ON the drop
+PICK 0 DROPS only if pool is genuinely flat (lofi, ambient, all-minor genre).
+For build/peak arcs with electronic material, 1-2 drops is the norm.
+
+WHEN TO USE SURPRISE BUDGET:
+  surprise_budget=N means N intentional surprises (genre_jump on incompatible
+  pair, callback to long-ago clip, drop tier on unexpected junction). DON'T
+  emit surprise_budget=0 unless the pool is truly homogeneous — wasted
+  opportunity to add character. For 10+ junction sets, surprise_budget 2-4
+  is the sweet spot.
 """
 
 
@@ -352,29 +388,16 @@ def _sanitize_out(raw: dict[str, Any], arc_fallback: str, user_prompt: str,
                       f"{len(pick)} minors → major at indices {pick} "
                       f"(was {cur_minor}/{n} minor, max_allowed {max_minor})")
 
-        # FORCE DROP for build/peak arcs: AI sets need a climax. If
-        # arc=build|peak and 0 drops emitted, promote 1 major near the
-        # 60-75% position (arc peak zone) to drop tier. Disable with
-        # AIJOCKEY_DIRECTOR_FORCE_DROP=0.
-        if (os.environ.get("AIJOCKEY_DIRECTOR_FORCE_DROP", "1") != "0"
+        # FORCE_DROP retired — user feedback: don't FORCE effects, encourage
+        # naturally via prompt examples. Disabled by default; flip
+        # AIJOCKEY_DIRECTOR_FORCE_DROP=1 to re-enable for stress tests.
+        if (os.environ.get("AIJOCKEY_DIRECTOR_FORCE_DROP", "0") == "1"
                 and arc in ("build", "peak") and n >= 6
                 and not any(t == "drop" for t in tiers)):
-            # Promote highest-index major in [int(0.55*n), int(0.80*n)] to drop
-            zone_lo = max(1, int(0.55 * n))
-            zone_hi = min(n - 1, int(0.80 * n))
-            target_idx = -1
+            zone_lo = max(1, int(0.55 * n)); zone_hi = min(n - 1, int(0.80 * n))
             for j in range(zone_hi, zone_lo - 1, -1):
-                if tiers[j] == "major":
-                    target_idx = j; break
-            if target_idx < 0:  # promote any minor in zone
-                for j in range(zone_hi, zone_lo - 1, -1):
-                    if tiers[j] == "minor":
-                        target_idx = j; break
-            if target_idx >= 0:
-                old_tier = tiers[target_idx]
-                tiers[target_idx] = "drop"
-                print(f"[director] force_drop: promoted {old_tier} → drop "
-                      f"at junction {target_idx} (arc={arc} peak zone)")
+                if tiers[j] in ("major", "minor"):
+                    tiers[j] = "drop"; break
 
     accents: list[dict[str, Any]] = []
     ah = raw.get("accent_hints")
@@ -391,29 +414,17 @@ def _sanitize_out(raw: dict[str, Any], arc_fallback: str, user_prompt: str,
             beats = float(item.get("beats", 2.0))
             accents.append({"junction_index": ji, "fx_category": fx, "beats": beats})
 
-    # AUTO-INJECT accents on major/drop junctions when LLM emitted none.
-    # AI sets need risers + impacts to sound climactic — Director's LLM
-    # tends to leave accent_hints empty. Force-add when missing.
-    # Disable with AIJOCKEY_DIRECTOR_AUTO_ACCENT=0.
-    if (os.environ.get("AIJOCKEY_DIRECTOR_AUTO_ACCENT", "1") != "0"
+    # AUTO_ACCENT retired — user feedback: don't FORCE injection. Director
+    # picks accents organically when prompt examples model the behavior.
+    # Default off; flip AIJOCKEY_DIRECTOR_AUTO_ACCENT=1 for stress test.
+    if (os.environ.get("AIJOCKEY_DIRECTOR_AUTO_ACCENT", "0") == "1"
             and not accents and tiers):
-        existing_ji = set()
         for j_idx, t in enumerate(tiers):
             if t == "drop":
-                # Riser ramp BEFORE drop (8 beats), impact ON drop (1 beat)
-                accents.append({"junction_index": j_idx,
-                                "fx_category": "risers", "beats": 8.0})
-                accents.append({"junction_index": j_idx,
-                                "fx_category": "impacts", "beats": 1.0})
-                existing_ji.add(j_idx)
-            elif t == "major" and j_idx not in existing_ji:
-                # Snare roll ramp BEFORE major (4 beats)
-                accents.append({"junction_index": j_idx,
-                                "fx_category": "snare_rolls", "beats": 4.0})
-                existing_ji.add(j_idx)
-        if accents:
-            print(f"[director] auto_accent: injected {len(accents)} accent_hints "
-                  f"on major/drop junctions (LLM left empty)")
+                accents.append({"junction_index": j_idx, "fx_category": "risers", "beats": 8.0})
+                accents.append({"junction_index": j_idx, "fx_category": "impacts", "beats": 1.0})
+            elif t == "major":
+                accents.append({"junction_index": j_idx, "fx_category": "snare_rolls", "beats": 4.0})
 
     # Phase 1: cap accents at 2 per junction to avoid pile-on. This matches
     # the constitutional `accent_budget` rule and gives Director-level defense.

@@ -233,6 +233,10 @@ ARC_PRESETS = {
     'descend':       [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.45, 0.4, 0.35, 0.3],
     'flat_high':     [0.85, 0.9, 0.9, 0.95, 0.95, 0.9, 0.9, 0.85, 0.85, 0.8],
     'flat_low':      [0.35, 0.4, 0.4, 0.45, 0.45, 0.4, 0.4, 0.35, 0.35, 0.3],
+    # Tomorrowland-grade: opener → first peak → recovery valley → bigger
+    # peak → cooldown. Multi-peak structure makes the climaxes feel earned
+    # (per docs/dj_research.md festival main-stage analysis).
+    'tomorrowland':  [0.35, 0.55, 0.80, 0.95, 0.55, 0.45, 0.70, 0.95, 1.0, 0.85, 0.60, 0.35],
 }
 
 
