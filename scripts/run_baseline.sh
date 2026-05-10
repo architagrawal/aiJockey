@@ -27,7 +27,11 @@ SRC_DIR="${SRC_DIR:-src}"
 LOG="${AIJOCKEY_PROBE_LOG:-/scratch/probes/log_cohorts.jsonl}"
 mkdir -p "$(dirname "$LOG")"
 > "$LOG"
-echo "[cohorts] log -> $LOG"
+# CRITICAL: export so child processes (baseline_renders.py → main.py →
+# log_render) write to this path. Without export, log_render falls through
+# to its default /scratch/probes/log.jsonl and the cohort log stays empty.
+export AIJOCKEY_PROBE_LOG="$LOG"
+echo "[cohorts] log -> $LOG (exported)"
 
 # Common env (improver passes enabled — gated per cohort)
 export AIJOCKEY_PHASE=1 AIJOCKEY_DTYPE=bfloat16 AIJOCKEY_PHRASE_QUANTIZE=1
