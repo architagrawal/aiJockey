@@ -127,47 +127,128 @@ def enabled() -> bool:
 
 def build_candidates(clip_meta: dict, sections: list[dict] | None = None,
                       min_seconds: float = 8.0,
-                      max_seconds: float = 60.0) -> list[dict]:
+                      max_seconds: float = 60.0,
+                      preferred_min_seconds: float = 20.0,
+                      hard_min_seconds: float = 8.0,
+                      exclude_indices: set | None = None,
+                      downbeats: list[float] | None = None) -> list[dict]:
     """Build candidate junctions from a clip's labeled sections.
 
-    Each candidate is a dict:
-        {
-          'start': float,         # seconds
-          'end':   float,
-          'label': str,           # All-In-One section label
-          'energy': float,        # 0..1 (from label or measured)
-          'duration': float,
-          'has_vocals': bool,     # heuristic from label
-        }
+    Output dict keys: start, end, label, canonical_label, energy,
+    vocal_activity, duration, has_vocals, duration_penalty, orig_index.
 
-    Filters by duration (too-short = no room to render the segment;
-    too-long = dominates the mix). Returns empty list when sections
-    absent or all candidates filtered out.
+    Tiered duration (#6): >=preferred_min penalty=0; hard_min..preferred
+    penalty=linear 0..1; <hard_min rejected.
+
+    `exclude_indices` (#4): drop sections at original indices — for
+    callback / reuse paths to force a DIFFERENT section on revisit.
+
+    `downbeats` (#5): if provided, snap start/end to nearest downbeat
+    within ±2 bars (BPM-derived). Phrase-aligned junctions reduce
+    bar-grid mismatch phase cancellation.
     """
     if sections is None:
         sections = clip_meta.get('sections') or []
+    exclude = exclude_indices or set()
+    try:
+        from picker_synonyms import canonical_section as _canon
+    except Exception:
+        def _canon(x):
+            return (x or '').lower()
+
+    bpm = float(clip_meta.get('tempo', 120.0)) or 120.0
+    bar_dur = 4.0 * 60.0 / bpm
+    snap_drift_max = 2.0 * bar_dur
+
+    def _snap(t: float) -> float:
+        if not downbeats:
+            return t
+        nearest = min(downbeats, key=lambda d: abs(d - t))
+        return float(nearest) if abs(nearest - t) <= snap_drift_max else t
+
     candidates: list[dict] = []
-    for s in sections:
+    for i, s in enumerate(sections):
+        if i in exclude:
+            continue
         start = float(s.get('start', 0.0))
         end = float(s.get('end', 0.0))
-        if end - start < min_seconds:
+        if downbeats:
+            start = _snap(start)
+            end = _snap(end)
+        dur = end - start
+        if dur < hard_min_seconds:
             continue
-        if end - start > max_seconds:
-            # Truncate long sections — keep the front so junction lands at
-            # the section's structural start.
+        if dur > max_seconds:
             end = start + max_seconds
+            dur = max_seconds
+        if dur < preferred_min_seconds:
+            denom = max(1e-6, preferred_min_seconds - hard_min_seconds)
+            dur_penalty = (preferred_min_seconds - dur) / denom
+        else:
+            dur_penalty = 0.0
         label = str(s.get('label', s.get('type', '?'))).lower()
-        energy = float(s.get('energy', _label_energy(label)))
-        has_vocals = label in ('verse', 'chorus', 'bridge', 'outro')
+        canonical = _canon(label)
+        energy = float(s.get('energy', _label_energy(canonical or label)))
+        va_raw = s.get('vocal_activity')
+        va = float(va_raw) if isinstance(va_raw, (int, float)) else None
+        if va is not None:
+            has_vocals = va > 0.20
+        else:
+            has_vocals = canonical in ('verse', 'chorus', 'bridge', 'outro')
         candidates.append({
             'start': start,
             'end': end,
             'label': label,
+            'canonical_label': canonical,
             'energy': energy,
-            'duration': end - start,
+            'vocal_activity': va,
+            'duration': dur,
             'has_vocals': has_vocals,
+            'duration_penalty': dur_penalty,
+            'orig_index': i,
         })
     return candidates
+
+
+def filter_by_transition_requires(candidates: list[dict],
+                                   transition_type: str,
+                                   side: str = 'prev') -> list[dict]:
+    """Drop candidates that don't satisfy a transition's requires spec.
+
+    side: 'prev' (outgoing) | 'cur' (incoming).
+    Returns input unchanged on import failure / no constraints.
+    """
+    if not transition_type:
+        return list(candidates)
+    try:
+        from picker_synonyms import requires_for, section_satisfies
+    except Exception:
+        return list(candidates)
+    spec = (requires_for(transition_type) or {}).get(f'{side}_requires')
+    if not spec:
+        return list(candidates)
+    return [c for c in candidates if section_satisfies(c, spec)]
+
+
+def filter_by_catalog_compat(candidates: list[dict],
+                              transition_type: str) -> list[dict]:
+    """Pre-pick check: reject candidates with section in transition's
+    catalog `incompatible_with` list (#14)."""
+    if not transition_type:
+        return list(candidates)
+    try:
+        from transition_catalog import get as _cat_get
+    except Exception:
+        return list(candidates)
+    entry = _cat_get(transition_type)
+    if not entry:
+        return list(candidates)
+    incompat = [s.lower() for s in (entry.get('incompatible_with') or [])]
+    if not incompat:
+        return list(candidates)
+    return [c for c in candidates
+            if c.get('canonical_label', '').lower() not in incompat
+            and c.get('label', '').lower() not in incompat]
 
 
 _LABEL_ENERGY_DEFAULTS = {
@@ -181,16 +262,31 @@ def _label_energy(label: str) -> float:
     return _LABEL_ENERGY_DEFAULTS.get(label.lower(), 0.5)
 
 
+_AGGRESSIVE_TRANSITIONS = frozenset({
+    'chop', 'tape_stop', 'drum_replace', 'kickless_swap',
+    'spinback', 'forward_spin', 'build_riser_drop', 'snare_buildup',
+    'scratch_fill', 'loop_tighten', 'loop_roll', 'beat_juggle',
+    'pitch_bend', 'bpm_warp', 'spectral_hold', 'silence_drop',
+    'breakdown_to_drop', 'drum_break',
+})
+
+
 def score_candidate(cand: dict, prev_meta: dict, *,
                     target_bpm: float | None = None,
                     target_key: str | None = None,
                     target_energy: float | None = None,
                     transition_type: str = '',
+                    next_transition_type: str = '',
                     weights: dict | None = None) -> tuple[float, dict]:
     """Multi-factor score in roughly [-3, +3] range. Higher = better.
 
     Returns (score, breakdown) where breakdown is per-factor contributions
     so the picker can log why a candidate won / lost.
+
+    next_transition_type (#7): when the FOLLOWING transition is in the
+    aggressive set, penalize high-VA candidates pre-emptively. Avoids
+    the picker choosing a vocal chorus only for vocal_guard to downgrade
+    the next transition to crossfade later.
     """
     w = _weights(weights)
 
@@ -202,13 +298,26 @@ def score_candidate(cand: dict, prev_meta: dict, *,
     else:
         e_contrib = 0.0
 
-    # 2. Transition-type fit
-    fit = _type_fit_score(transition_type, cand['label'])
+    # 2. Transition-type fit (uses canonical_label when available)
+    label_for_fit = cand.get('canonical_label') or cand.get('label', '')
+    fit = _type_fit_score(transition_type, label_for_fit)
     # 0.5 fit (neutral) → 0 contribution; 1.0 fit → +1; 0.0 fit → -1
     fit_contrib = (fit - 0.5) * 2.0
 
     # 3. Vocal presence — penalize vocals at junctions (collisions)
-    vocal_contrib = -0.5 if cand['has_vocals'] else 0.5
+    va_actual = cand.get('vocal_activity')
+    if isinstance(va_actual, (int, float)):
+        # 0 va → +0.5; 0.5 va → 0; 1.0 va → -0.5
+        vocal_contrib = 0.5 - float(va_actual)
+    else:
+        vocal_contrib = -0.5 if cand['has_vocals'] else 0.5
+    # #7 — extra penalty when NEXT transition is aggressive (vocal_guard
+    # would otherwise downgrade it). Pre-empt at picker layer.
+    if next_transition_type and next_transition_type.lower() in _AGGRESSIVE_TRANSITIONS:
+        if isinstance(va_actual, (int, float)) and va_actual > 0.30:
+            vocal_contrib -= 0.8 * (float(va_actual) - 0.30) / 0.70
+        elif cand.get('has_vocals'):
+            vocal_contrib -= 0.5
 
     # 4. Camelot key compat (penalize larger distance)
     if target_key:
@@ -243,6 +352,12 @@ def score_candidate(cand: dict, prev_meta: dict, *,
     else:
         dur_contrib = 0.0    # tolerable but not preferred
 
+    # Tiered duration penalty (#6) — graded reduction within preferred
+    # band. Stacks with hard 8/40/12-40 logic above.
+    dp = float(cand.get('duration_penalty', 0.0))
+    if dp > 0:
+        dur_contrib -= dp     # subtract penalty (0..1) from contribution
+
     breakdown = {
         'energy':   round(w['energy']   * e_contrib, 3),
         'type_fit': round(w['type_fit'] * fit_contrib, 3),
@@ -260,6 +375,7 @@ def pick_best_junction(prev_meta: dict, candidates: list[dict], *,
                        target_key: str | None = None,
                        target_energy: float | None = None,
                        transition_type: str = '',
+                       next_transition_type: str = '',
                        weights: dict | None = None,
                        min_score: float | None = None,
                        ) -> dict | None:
@@ -283,6 +399,7 @@ def pick_best_junction(prev_meta: dict, candidates: list[dict], *,
             target_key=target_key,
             target_energy=target_energy,
             transition_type=transition_type,
+            next_transition_type=next_transition_type,
             weights=weights,
         )
         scored.append((s, b, c))
