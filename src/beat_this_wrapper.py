@@ -12,8 +12,21 @@ Lazy load: model is only imported on first call so import-time cost stays
 free for paths that don't need beats.
 
 Env:
-  AIJOCKEY_BEAT_THIS    0|1   default 1; set 0 to force librosa fallback
-  AIJOCKEY_BEAT_THIS_CKPT  hf-id|path  default 'CPJKU/beat_this-final0'
+  AIJOCKEY_BEAT_THIS    0|1   default 0; set 1 to enable. Default OFF because
+                        beat_this's `minimal` postprocessor (the only one
+                        usable without madmom) produces 2-3x BPM garbage on
+                        complex material — verified on test1/test2 (103/117
+                        BPM librosa, 333/231 BPM beat_this minimal).
+                        Re-enable once madmom-rocm fork lands so the DBN
+                        postprocessor (`dbn=True`) can be used.
+  AIJOCKEY_BEAT_THIS_CKPT  str   default 'final0'
+  AIJOCKEY_BEAT_THIS_DBN   0|1   default 0; set 1 to use DBN postprocessor
+                                 (requires madmom — install separately).
+  AIJOCKEY_BEAT_THIS_TEMPO_CAP  float  default 220.0; output rejected (returns
+                                       to caller's librosa fallback) when
+                                       median-IBI tempo exceeds this BPM.
+                                       Sanity guard against the minimal-
+                                       postprocessor failure mode.
 """
 from __future__ import annotations
 
@@ -31,7 +44,7 @@ _LOAD_FAILED = False
 
 def available() -> bool:
     """Return True if Beat-This! is installed and load did not previously fail."""
-    if os.environ.get('AIJOCKEY_BEAT_THIS', '1') == '0':
+    if os.environ.get('AIJOCKEY_BEAT_THIS', '0') == '0':
         return False
     if _LOAD_FAILED:
         return False
@@ -58,10 +71,13 @@ def _load(device: str = 'cuda'):
 
         ckpt = os.environ.get('AIJOCKEY_BEAT_THIS_CKPT', 'final0')
         # Beat-This! `File2Beats` ships its own preprocessor + post-processor.
-        # `dbn=False` uses the lightweight peak-picker (faster, ~equal accuracy
-        # on Western popular music). `dbn=True` enables the madmom DBN
-        # post-processor — slower + extra dep we want to avoid.
-        _MODEL = File2Beats(checkpoint_path=ckpt, device=device, dbn=False)
+        # `dbn=True` uses madmom DBN post-processor — accurate but adds heavy
+        # dep that does not build on Py3.10 ROCm. `dbn=False` uses the
+        # lightweight peak-picker which produced 2-3x BPM garbage on real DJ
+        # clips (verified test1/test2). Only enable dbn=True when madmom is
+        # installed; otherwise the caller wraps a sanity guard around output.
+        use_dbn = os.environ.get('AIJOCKEY_BEAT_THIS_DBN', '0') == '1'
+        _MODEL = File2Beats(checkpoint_path=ckpt, device=device, dbn=use_dbn)
         _DEVICE = device
         try:
             _DTYPE = torch.bfloat16 if (device == 'cuda' and torch.cuda.is_bf16_supported()) else torch.float32
@@ -102,8 +118,9 @@ def beats_from_array(audio_mono: np.ndarray, sr: int,
     # Audio2Beats wraps the same model — instantiate once per call is cheap
     # because it reuses the cached File2Beats internals. Most cost is the
     # forward pass, not the wrapper init.
+    use_dbn = os.environ.get('AIJOCKEY_BEAT_THIS_DBN', '0') == '1'
     a2b = Audio2Beats(checkpoint_path=os.environ.get('AIJOCKEY_BEAT_THIS_CKPT', 'final0'),
-                      device=dev, dbn=False)
+                      device=dev, dbn=use_dbn)
     audio = audio_mono.astype(np.float32)
     if audio.ndim != 1:
         audio = audio.reshape(-1)
@@ -115,4 +132,17 @@ def beats_from_array(audio_mono: np.ndarray, sr: int,
         tempo = 60.0 / float(np.median(ibis))
     else:
         tempo = 0.0
+    # Sanity guard: minimal postprocessor (dbn=False) over-detects on complex
+    # material and emits 2-3x true BPM with near-equal beats:downbeats counts.
+    # Reject so the caller falls through to its librosa/madmom path.
+    cap = float(os.environ.get('AIJOCKEY_BEAT_THIS_TEMPO_CAP', '220.0'))
+    if tempo > cap:
+        raise RuntimeError(f"beat_this output rejected: tempo={tempo:.1f} > cap={cap} "
+                           f"(minimal postprocessor over-detection — install madmom + "
+                           f"set AIJOCKEY_BEAT_THIS_DBN=1, or stay on librosa fallback)")
+    if len(beats) > 0 and len(downbeats) >= len(beats) * 0.6:
+        # downbeats should be ~1/4 of beats in 4/4. >0.6 means postprocessor
+        # is treating most beats as downbeats — same failure mode.
+        raise RuntimeError(f"beat_this output rejected: downbeats={len(downbeats)} "
+                           f">= 60% of beats={len(beats)} (minimal postprocessor failure)")
     return tempo, beats, downbeats
