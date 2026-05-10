@@ -539,6 +539,32 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
     if int(tech.get('bars', 16)) != bars:
         tech['bars_effective'] = bars
     ramp = int(beat_dur * SR * 2)
+
+    # DTW sub-sample alignment of the overlap region. Targets sample-jitter
+    # class of phase cancellation (5-30ms beat-tracker imprecision documented
+    # in cohort verdict: spectral_phasing = 93% of severity). Module
+    # auto-skips when xcorr confidence too low (pool too disparate to align
+    # reliably) — see src/dtw_align.py for safety gates.
+    # Default OFF; enable with AIJOCKEY_DTW_ALIGN=1.
+    try:
+        from dtw_align import enabled as _dtw_enabled, align_overlap as _dtw_align_overlap
+        if _dtw_enabled() and overlap_n > 0:
+            _prev_tail = output[:, -overlap_n:] if output.shape[1] >= overlap_n else output
+            _cur_full = cur['full']
+            _cur_head = _cur_full[:, :overlap_n] if _cur_full.shape[1] >= overlap_n else _cur_full
+            _aligned, _shift_samples, _conf = _dtw_align_overlap(_prev_tail, _cur_head, sr=SR)
+            if _shift_samples != 0:
+                # Splice aligned head back into a fresh cur dict — don't mutate
+                # the caller's dict, downstream code rebuilds variants from cur.
+                cur = dict(cur)
+                cur['full'] = np.concatenate(
+                    [_aligned, _cur_full[:, _aligned.shape[1]:]], axis=1
+                )
+                print(f"[dtw] j-shift={_shift_samples:+d} samples "
+                      f"({1000.0 * _shift_samples / SR:+.1f}ms) conf={_conf:.2f}")
+    except Exception as _e:
+        print(f"[dtw] skipped: {_e.__class__.__name__}: {_e}")
+
     # Build vocal-suppressed cur for overlap-style transitions
     cur_no_intro_vox = dict(cur)
     cur_no_intro_vox['full'] = _suppress_intro_vocals(
