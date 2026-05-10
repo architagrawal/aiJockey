@@ -697,19 +697,41 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
                      'forward_spin'}
         HEAVY = {'drum_replace', 'kickless_swap', 'snare_buildup',
                  'build_riser_drop', 'punch_in'}
+        # ARTIFACT_PRONE: techniques that produce abrupt frequency-content
+        # rearrangement → Audiobox PQ -0.3 to -0.6 when applied to vocal-
+        # adjacent junctions. Per v9/v11 audit: drum_replace, bass_swap,
+        # instrumental_swap caused most of the 7.84→7.15 PQ regression.
+        # Allow only when both sides are deep instrumental (max VA <
+        # AIJOCKEY_VOCAL_GUARD_THR_QUALITY, default 0.15). Otherwise
+        # downgrade to a gentler equivalent (per dj_research §6 vocal-safe
+        # set) instead of crossfade — preserves variety without artifact.
+        ARTIFACT_PRONE = {'drum_replace', 'bass_swap', 'instrumental_swap',
+                          'kickless_swap'}
+        ARTIFACT_FALLBACK = {
+            'drum_replace':      'drum_break',     # gentler stem hide
+            'bass_swap':         'long_crossfade', # smooth low-band handoff
+            'instrumental_swap': 'mashup',         # softer stem rework
+            'kickless_swap':     'highs_swap',     # frequency-light variant
+        }
+        thr_quality = float(os.environ.get('AIJOCKEY_VOCAL_GUARD_THR_QUALITY', '0.15'))
         max_va = max(prev_va, cur_va)
         downgrade = False
         reason = ''
+        fallback_to = 'crossfade'
         if name in SHREDDERS and max_va > thr_shred:
             downgrade, reason = True, f'shredder>{thr_shred}'
         elif name in HEAVY and max_va > thr_heavy:
             downgrade, reason = True, f'heavy>{thr_heavy}'
+        elif name in ARTIFACT_PRONE and max_va > thr_quality:
+            downgrade = True
+            reason = f'artifact_prone>{thr_quality}'
+            fallback_to = ARTIFACT_FALLBACK.get(name, 'crossfade')
         if downgrade:
-            print(f"[vocal_guard] {name} → crossfade "
+            print(f"[vocal_guard] {name} → {fallback_to} "
                   f"({reason}, prev_va={prev_va:.2f} cur_va={cur_va:.2f})")
             tech['_vocal_guard_downgraded_from'] = name
-            name = 'crossfade'
-            tech['name'] = 'crossfade'
+            name = fallback_to
+            tech['name'] = fallback_to
 
     # DTW sub-sample alignment of the overlap region. Runs AFTER vocal_guard
     # so the (possibly downgraded) transition technique sees the aligned
