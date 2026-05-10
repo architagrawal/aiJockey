@@ -257,6 +257,50 @@ def _user_pool_centroid(saved_paths: list[Path], cache_dir: Path
     return np.mean(np.stack(arrs), axis=0)
 
 
+def _candidate_pool_for_user_clip(user_emb, user_bpm_mean: float | None,
+                                    bpm_tol_pct: float, top_k: int):
+    """Score the whole library by cosine to ONE user clip's CLAP embedding.
+
+    Returns list of (sim, path, npz_path, meta_path) sorted desc by sim.
+    Multi-query retrieval primitive — caller unions top-K across user
+    clips so picks connect to AT LEAST ONE user clip individually
+    (not the averaged centroid that loses individual character).
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return []
+    if not LIBRARY_CACHE_DIR.exists():
+        return []
+    enorm = float(np.linalg.norm(user_emb)) + 1e-9
+    cands = []
+    for p in sorted(LIBRARY_CLIPS_DIR.iterdir()):
+        if p.suffix.lower() not in ALLOWED_EXTS:
+            continue
+        npz = LIBRARY_CACHE_DIR / f"{p.stem}.npz"
+        meta = LIBRARY_CACHE_DIR / f"{p.stem}.json"
+        if not npz.exists() or not meta.exists():
+            continue
+        try:
+            with np.load(npz) as d:
+                a = np.asarray(d["clap"], dtype=np.float32).reshape(-1) \
+                    if "clap" in d else None
+            if a is None or a.size == 0:
+                continue
+            if user_bpm_mean is not None:
+                import json as _json
+                m = _json.loads(meta.read_text())
+                bpm = float(m.get("tempo", 0.0))
+                if bpm > 0 and abs(bpm - user_bpm_mean) / user_bpm_mean > bpm_tol_pct / 100.0:
+                    continue
+            sim = float((a @ user_emb) / (np.linalg.norm(a) * enorm + 1e-9))
+            cands.append((sim, p, npz, meta))
+        except Exception:
+            continue
+    cands.sort(key=lambda x: -x[0])
+    return cands[:top_k]
+
+
 def library_clip_paths_clap(centroid, count: int,
                               user_bpm_mean: float | None = None,
                               bpm_tol_pct: float = 15.0,
@@ -292,6 +336,27 @@ def library_clip_paths_clap(centroid, count: int,
         return library_clip_paths(limit=count)
     if not LIBRARY_CACHE_DIR.exists():
         return []
+
+    # Multi-query candidate set: instead of scoring the entire library by
+    # cosine to the AVERAGED centroid (which loses individual user-clip
+    # character — Spotify/YT 2-tower lesson), retrieve top-K per user clip
+    # individually then take the UNION. Re-ranking below applies composite
+    # score to this filtered candidate set. Guarantees each library pick
+    # is close to at least ONE user clip, not just close to a meaningless
+    # average. Skipped when user_clap_embs not supplied (legacy path).
+    candidate_paths: set[Path] = set()
+    if user_clap_embs:
+        per_clip_top_k = max(2 * count, 8)
+        for ue in user_clap_embs:
+            for sim, p, _npz, _meta in _candidate_pool_for_user_clip(
+                    ue, user_bpm_mean, bpm_tol_pct, per_clip_top_k):
+                candidate_paths.add(p)
+        try:
+            print(f"[lib_pick] multi-query candidate set: "
+                  f"{len(candidate_paths)} (top-{per_clip_top_k} × "
+                  f"{len(user_clap_embs)} user clips, deduped)")
+        except Exception:
+            pass
 
     # Camelot adjacency lookup: keys are compatible if same number, ±1 number,
     # or same-letter swap. Distance 0/1 = compatible, 2+ = clash.
@@ -342,7 +407,11 @@ def library_clip_paths_clap(centroid, count: int,
 
     cnorm = float(np.linalg.norm(centroid)) + 1e-9
     candidates: list[tuple[float, Path, dict]] = []
-    for p in sorted(LIBRARY_CLIPS_DIR.iterdir()):
+    # Iterate the filtered candidate set when multi-query was used,
+    # else fall back to whole library iteration (legacy path).
+    iter_paths = (sorted(candidate_paths) if candidate_paths
+                  else sorted(LIBRARY_CLIPS_DIR.iterdir()))
+    for p in iter_paths:
         if p.suffix.lower() not in ALLOWED_EXTS:
             continue
         npz = LIBRARY_CACHE_DIR / f"{p.stem}.npz"
