@@ -34,6 +34,12 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "server"))
 
 from joblog import jlog
+try:
+    from preset import apply_preset, PRESET_SCHEMA, ADVANCED_SCHEMA  # type: ignore
+except Exception:
+    apply_preset = None
+    PRESET_SCHEMA = {}
+    ADVANCED_SCHEMA = {}
 
 SERVER_KEY = os.environ.get("SERVER_KEY", "")
 IDLE_FILE = Path(os.environ.get("IDLE_FILE", "/tmp/aijockey-last"))
@@ -666,6 +672,15 @@ def ready():
     return {"status": "ready", "disk_free_gb": disk_free_gb()}
 
 
+@app.get("/preset_schema")
+def preset_schema():
+    """Return frontend-renderable schemas for mode/vocals/style/advanced.
+
+    UI consumes this to render radios/sliders without hard-coding option lists.
+    """
+    return {"presets": PRESET_SCHEMA, "advanced": ADVANCED_SCHEMA}
+
+
 @app.get("/jobs/{job_id}/timeline")
 def job_timeline(job_id: str,
                  x_key: str | None = Header(default=None, alias="X-Key")):
@@ -1139,6 +1154,10 @@ async def generate(
     lufs: float = Form(-9.0),
     export_format: str = Form(EXPORT_MP3),
     instrumental_only: bool = Form(True),
+    mode: str = Form("dj_set"),
+    vocals: str = Form("on"),
+    style: str | None = Form(None),
+    advanced_json: str | None = Form(None),
     x_key: str | None = Header(default=None, alias="X-Key"),
 ):
     global _concurrent_denied
@@ -1157,17 +1176,57 @@ async def generate(
             400,
             detail=f"invalid arc {arc!r}; allowed in current phase: {valid_arcs}",
         )
-    mode = (mix_mode or "balanced").lower().strip()
-    if mode not in VALID_MIX_MODES:
+    mix_mode_v = (mix_mode or "balanced").lower().strip()
+    if mix_mode_v not in VALID_MIX_MODES:
         raise HTTPException(400, detail=f"invalid mix_mode {mix_mode!r}; "
                                          f"valid: {VALID_MIX_MODES}")
     role = (library_role or "").lower().strip() or None
     if role is not None and role not in VALID_LIBRARY_ROLES:
         raise HTTPException(400, detail=f"invalid library_role {library_role!r}; "
                                          f"valid: {VALID_LIBRARY_ROLES}")
-    # tight mode forces use_library off regardless of toggle.
-    if mode == "tight":
+    # tight mix_mode forces use_library off regardless of toggle.
+    if mix_mode_v == "tight":
         use_library = False
+
+    # Resolve output-style mode + vocals + style via teammate's preset module.
+    mode_v = (mode or "dj_set").lower().strip()
+    vocals_v = (vocals or "on").lower().strip()
+    style_v = (style or "").lower().strip() or None
+    advanced_dict: dict = {}
+    if advanced_json:
+        try:
+            advanced_dict = json.loads(advanced_json) or {}
+            if not isinstance(advanced_dict, dict):
+                raise ValueError("not an object")
+        except Exception as e:
+            raise HTTPException(400, detail=f"advanced_json must be JSON object: {e}")
+
+    env_overrides: dict[str, str] = {}
+    cli_overrides: dict = {}
+    if apply_preset is not None:
+        try:
+            env_overrides, cli_overrides = apply_preset(
+                mode=mode_v, vocals=vocals_v, style=style_v, arc=arc,
+                mix_mode=mix_mode_v, advanced=advanced_dict, base_prompt=prompt,
+            )
+        except ValueError as e:
+            raise HTTPException(400, detail=str(e))
+
+    # cli['arc'] / cli['prompt'] / cli['lufs'] override locals when supplied.
+    if cli_overrides.get("arc"):
+        arc = cli_overrides["arc"]
+    if cli_overrides.get("prompt"):
+        prompt = cli_overrides["prompt"]
+    if cli_overrides.get("lufs") is not None:
+        try:
+            lufs = float(cli_overrides["lufs"])
+        except Exception:
+            pass
+    # vocals=off mirrors instrumental_only for backward-compat consumers.
+    if vocals_v == "off":
+        instrumental_only = True
+    elif vocals_v == "on":
+        instrumental_only = False
 
     # Phase 1: min 3 clips. If user gave fewer, require library augmentation.
     min_clips = _min_clips()
@@ -1213,12 +1272,17 @@ async def generate(
             # all write the same value — race is benign. If mixed-mode usage
             # appears, refactor execute() to read this flag from a per-job
             # parameter instead of process env.
-            _ENV_KEY = "AIJOCKEY_INSTRUMENTAL_ONLY"
-            _prev = os.environ.get(_ENV_KEY)
-            if instrumental_only:
-                os.environ[_ENV_KEY] = "1"
-            else:
-                os.environ.pop(_ENV_KEY, None)
+            # Set env from preset module (mode + vocals + advanced) AND the
+            # instrumental_only flag. try/finally restores prior values so a
+            # crash can't leak env across concurrent jobs.
+            envs_to_set: dict[str, str] = dict(env_overrides)
+            envs_to_set["AIJOCKEY_INSTRUMENTAL_ONLY"] = "1" if instrumental_only else "0"
+            envs_to_set["AIJOCKEY_MODE"] = mode_v
+            envs_to_set["AIJOCKEY_VOCALS"] = vocals_v
+            saved_env: dict[str, str | None] = {}
+            for k, v in envs_to_set.items():
+                saved_env[k] = os.environ.get(k)
+                os.environ[k] = v
             try:
                 return _run_generate_sync(
                     job_id=job_id,
@@ -1231,14 +1295,15 @@ async def generate(
                     seed=seed,
                     lufs=lufs,
                     export_format=ef,
-                    mix_mode=mode,
+                    mix_mode=mix_mode_v,
                     library_role=role,
                 )
             finally:
-                if _prev is None:
-                    os.environ.pop(_ENV_KEY, None)
-                else:
-                    os.environ[_ENV_KEY] = _prev
+                for k, prev in saved_env.items():
+                    if prev is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = prev
 
         try:
             artifact, timeline_path = await asyncio.wait_for(
@@ -1260,7 +1325,8 @@ async def generate(
         mt = media_types.get(ef, "application/octet-stream")
         fname = f"aijockey_{job_id}{Path(artifact).suffix}"
 
-        headers = {"X-Job-Id": job_id, "X-Mix-Mode": mode}
+        headers = {"X-Job-Id": job_id, "X-Mix-Mode": mix_mode_v,
+                   "X-Mode": mode_v, "X-Vocals": vocals_v}
         try:
             tl_p = RESULTS_DIR / job_id / "timeline.json"
             if tl_p.exists():
@@ -1397,7 +1463,7 @@ async def generate(
                                 job_id=job_id,
                                 prompt=tl_blob.get("meta", {}).get("prompt"),
                                 arc=director_blob.get("arc"),
-                                mix_mode=mode,
+                                mix_mode=mix_mode_v,
                                 duration_target_s=tl_blob.get("meta", {})
                                                   .get("target_duration"),
                                 duration_actual_s=probe.get("duration_sec"),
