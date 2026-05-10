@@ -548,7 +548,11 @@ def _call_hf_instruct(user_message: str, model_id: str) -> str:
         prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     else:
         prompt = "System:\n" + SYSTEM_PROMPT + "\nUser:\n" + user_message + "\nAssistant:\n"
-    inputs = tok(prompt, return_tensors="pt", truncation=True, max_length=2048)
+    # Pool inventory + system prompt + chat-template tags can exceed 2k
+    # tokens. Truncating mid-template strips <|im_start|>assistant and
+    # makes the LM continue user text instead of answering. Qwen2.5
+    # supports 32k+ context — give the prompt headroom.
+    inputs = tok(prompt, return_tensors="pt", truncation=True, max_length=8192)
     if torch.cuda.is_available():
         inputs = {k: v.cuda() for k, v in inputs.items()}
     with torch.inference_mode():
