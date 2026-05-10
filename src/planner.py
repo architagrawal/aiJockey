@@ -54,7 +54,11 @@ class PlannerConfig:
     min_unique_clips: int = 5                 # min distinct clips that must appear
     allow_clip_reuse: bool = True             # reuse clips when pool exhausted
     clip_reuse_cooldown: int = 5              # min entries between reuses of same clip
-    min_segment_seconds: float = 30.0         # skip sections shorter than this
+    min_segment_seconds: float = 18.0         # skip sections shorter than this (was 30)
+    max_segment_seconds: float = 32.0         # cap each segment so set rotates;
+                                              # forces A-B-C-A-D callbacks instead
+                                              # of camping on long verses (~16-32 bar
+                                              # standard per dj_research §3)
     weights: dict = field(default_factory=lambda: dict(
         key=0.25, tempo=0.20, energy=0.20, timbre=0.15,
         variety=0.10, surprise=0.10,
@@ -593,12 +597,21 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
     # High arc[0] -> banger-from-the-jump opener. Arc shape is configurable;
     # not assumed to start low.
     target_e_open = config.energy_arc[0] if config.energy_arc else 0.3
+    # Helper: cap segment to max_segment_seconds so set rotates.
+    def _cap_seg(seg: dict) -> dict:
+        s, e = float(seg.get('start', 0)), float(seg.get('end', 0))
+        if config.max_segment_seconds > 0 and (e - s) > config.max_segment_seconds:
+            seg = dict(seg)
+            seg['end'] = s + config.max_segment_seconds
+            seg['_seg_capped'] = True
+        return seg
     starts: list[State] = []
     for cid, clip in clips.items():
         seg, seg_idx = pick_segment(
             clip, target_energy=target_e_open,
             min_seconds=config.min_segment_seconds,
         )
+        seg = _cap_seg(seg)
         target_bpm = clip.get('tempo', 128.0) or 128.0
         entry = TimelineEntry(
             clip_id=cid, segment=seg, target_bpm=target_bpm,
@@ -672,6 +685,7 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
                     min_seconds=config.min_segment_seconds,
                     prefer_instrumental=True,
                 )
+                seg = _cap_seg(seg)
                 score, tech, is_surprise = transition_score(
                     last_clip, last.segment, last.target_bpm, last.target_key,
                     cand, seg, w_eff,
@@ -719,6 +733,7 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
                     min_seconds=config.min_segment_seconds,
                     prefer_instrumental=True,
                 )
+                seg = _cap_seg(seg)
                 score, tech, _ = transition_score(
                     last_clip, last.segment, last.target_bpm, last.target_key,
                     cand, seg, w_eff,
