@@ -324,6 +324,34 @@ def _sanitize_out(raw: dict[str, Any], arc_fallback: str, user_prompt: str,
         tiers.append("minor")
     tiers = tiers[:max_transitions]
 
+    # ENFORCE TIER DIVERSITY (post-LLM safety net):
+    # Director's LLM is biased toward all-minor for "disparate" pools — even
+    # though the prompt says <=75% minor + always 1-2 majors. Enforce here.
+    # Disable with AIJOCKEY_DIRECTOR_TIER_ENFORCE=0.
+    if os.environ.get("AIJOCKEY_DIRECTOR_TIER_ENFORCE", "1") != "0" and tiers:
+        import math as _math
+        n = len(tiers)
+        max_minor_pct = float(os.environ.get("AIJOCKEY_DIRECTOR_MAX_MINOR_PCT", "0.75"))
+        max_minor = int(_math.ceil(n * max_minor_pct))
+        cur_minor = sum(1 for t in tiers if t == "minor")
+        if cur_minor > max_minor and n >= 4:
+            # Need to demote (cur_minor - max_minor) entries from minor → major.
+            # Prefer interior junctions (skip first + last, which are
+            # naturally fade_in / cooldown). Pick evenly-spaced positions
+            # so majors are spread across the set, not clumped.
+            n_to_promote = cur_minor - max_minor
+            interior_minor_idx = [i for i, t in enumerate(tiers)
+                                  if t == "minor" and 0 < i < n - 1]
+            if interior_minor_idx:
+                # Even spacing within available indices
+                step = max(1, len(interior_minor_idx) // n_to_promote)
+                pick = interior_minor_idx[::step][:n_to_promote]
+                for idx in pick:
+                    tiers[idx] = "major"
+                print(f"[director] tier-diversity enforcement: promoted "
+                      f"{len(pick)} minors → major at indices {pick} "
+                      f"(was {cur_minor}/{n} minor, max_allowed {max_minor})")
+
     accents: list[dict[str, Any]] = []
     ah = raw.get("accent_hints")
     if isinstance(ah, list):
@@ -380,6 +408,14 @@ def _sanitize_out(raw: dict[str, Any], arc_fallback: str, user_prompt: str,
         intents.append({"drop": "drop_payoff", "major": "genre_jump",
                         "minor": "smooth_continue"}.get(t, "smooth_continue"))
     intents = intents[:len(tiers)]
+    # Re-sync intents to tiers in case tier enforcement promoted entries:
+    # if a junction is now `major` but its intent says `smooth_continue`,
+    # upgrade intent to `genre_jump` so planner sees coherent signal.
+    for i, (t, it) in enumerate(zip(tiers, intents)):
+        if t == "major" and it in ("smooth_continue", "breath", "cooldown"):
+            intents[i] = "genre_jump"
+        elif t == "drop" and it != "drop_payoff":
+            intents[i] = "drop_payoff"
 
     return {
         "arc": arc,
