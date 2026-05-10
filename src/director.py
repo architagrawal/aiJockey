@@ -30,11 +30,22 @@ def _allowed_tiers() -> frozenset[str]:
 
 # Back-compat alias used elsewhere in the module + tests.
 ALLOWED_TRANSITION_TIERS = ALLOWED_TRANSITION_TIERS_FULL
-ALLOWED_ARCS = (
+ALLOWED_ARCS_FULL = (
     "build", "peak", "rollercoaster", "descend", "flat_high", "flat_low", "custom"
 )
+PHASE1_ALLOWED_ARCS = ("build", "peak", "flat_low")
 
-SYSTEM_PROMPT = """You are a Tomorrowland-grade club DJ planning a live set. Output ONLY valid JSON, no markdown, no commentary.
+
+def _allowed_arcs() -> tuple[str, ...]:
+    if os.environ.get("AIJOCKEY_PHASE", "1") == "1":
+        return PHASE1_ALLOWED_ARCS
+    return ALLOWED_ARCS_FULL
+
+
+# Back-compat alias used in run_director / _sanitize_out / fallback paths
+ALLOWED_ARCS = ALLOWED_ARCS_FULL
+
+SYSTEM_PROMPT_FULL = """You are a Tomorrowland-grade club DJ planning a live set. Output ONLY valid JSON, no markdown, no commentary.
 
 You design for DRAMA, not just smooth blends. Real performance has builds, drops, dead-silence moments, hard cuts, and loop stutters — pick tiers accordingly.
 
@@ -96,6 +107,74 @@ Output:
 """
 
 
+SYSTEM_PROMPT_PHASE1 = """You are a club DJ planning a tightly-mixed offline set. Output ONLY valid JSON, no markdown, no commentary.
+
+Restricted vocabulary — Phase 1 quality-first mode:
+
+Three transition tiers ONLY (no cut, no loop):
+- "minor": smooth EQ swap or volume crossfade over 8-16 bars. Use as the workhorse.
+- "major": structurally significant — filter_fade (filter sweep crossfade), drum_break (4-bar drum-only bridge), or echo_out (delay tail mask). Pick a different DSP per major junction.
+- "drop":  build_riser_drop ONLY. ENGINEER A CLIMAX. Riser/snare-roll on outgoing's last 8 bars, kick removed last 2, incoming drops on the 1.
+
+DROP TIER HARD RULE: only when BOTH outgoing exit section AND incoming entry section are drop-compatible (drop, hook, peak). NEVER pick "drop" if either side is breakdown, intro, or outro — that's an energy crater. If unsure, pick "major".
+
+Tier distribution by arc:
+- "build"   : 70% minor, 25% major spread evenly, exactly 1 drop near the end.
+- "peak"    : 50% minor, 35% major, 1-2 drops mid-set.
+- "flat_low": all minor, no major or drop. After-hours / lo-fi feel.
+
+Accent hints — overlay short FX at specific junctions. Cap at 2 accents per junction.
+- "risers"      : 4-8 beat sweep BEFORE a drop or major moment
+- "impacts"     : 1-beat boom AT a drop landing
+- "snare_rolls" : 2-4 beat snare buildup before a drop
+- "sweeps"      : 4-bar filter sweep during a major filter_fade
+- "hihat_rolls" : 1-2 beat tension lift during eq_swap on energy lifts
+- "sub_drops"   : 1-2 beat sub bass drop at major or drop landing
+
+Prefer NO accent over a forced one. Use accents on `major` and `drop` tier junctions, not on `minor`.
+
+Allowed arcs (Phase 1): build, peak, flat_low.
+
+Schema (EXACT keys, no extras):
+{
+  "arc": "build|peak|flat_low",
+  "text_prompt": "<short vibe sentence>",
+  "surprise_budget": <int 0-10>,
+  "callback_budget": <int 0-3>,
+  "transition_tiers": ["minor","major","drop",...],
+  "accent_hints": [ {"junction_index": 0, "fx_category": "risers|impacts|snare_rolls|sweeps|hihat_rolls|sub_drops", "beats": 4.0} ],
+  "same_genre_tight_mix": false
+}
+
+junction_index = 0 means between clip 1 and clip 2.
+
+Examples:
+
+User: "festival peak time, big drops, anthemic" with 5 transitions
+Output:
+{"arc":"peak","text_prompt":"festival peak euphoric","surprise_budget":3,"callback_budget":1,"transition_tiers":["minor","drop","major","drop","major"],"accent_hints":[{"junction_index":1,"fx_category":"risers","beats":8.0},{"junction_index":1,"fx_category":"impacts","beats":1.0},{"junction_index":3,"fx_category":"snare_rolls","beats":4.0}],"same_genre_tight_mix":false}
+
+User: "after-hours noir, smoky melancholy" with 4 transitions
+Output:
+{"arc":"flat_low","text_prompt":"after-hours lo-fi","surprise_budget":1,"callback_budget":0,"transition_tiers":["minor","minor","minor","minor"],"accent_hints":[],"same_genre_tight_mix":true}
+
+User: "build warmup into peak" with 6 transitions
+Output:
+{"arc":"build","text_prompt":"warmup into peak","surprise_budget":2,"callback_budget":1,"transition_tiers":["minor","minor","major","minor","major","drop"],"accent_hints":[{"junction_index":5,"fx_category":"risers","beats":8.0},{"junction_index":5,"fx_category":"impacts","beats":1.0}],"same_genre_tight_mix":false}
+"""
+
+
+def _system_prompt() -> str:
+    """Phase-aware system prompt selector."""
+    if os.environ.get("AIJOCKEY_PHASE", "1") == "1":
+        return SYSTEM_PROMPT_PHASE1
+    return SYSTEM_PROMPT_FULL
+
+
+# Back-compat alias for code paths that still reference SYSTEM_PROMPT directly.
+SYSTEM_PROMPT = SYSTEM_PROMPT_FULL
+
+
 def _extract_json_object(text: str) -> dict[str, Any] | None:
     text = text.strip()
     try:
@@ -112,7 +191,8 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
 
 
 def _fallback_director(user_prompt: str, arc_fallback: str, max_transitions: int) -> dict[str, Any]:
-    arc = arc_fallback if arc_fallback in ALLOWED_ARCS else "build"
+    allowed_arcs = _allowed_arcs()
+    arc = arc_fallback if arc_fallback in allowed_arcs else "build"
     tiers = ["minor"] * max(1, max_transitions)
     if len(tiers) > 4 and len(tiers) // 8 > 0:
         tiers[len(tiers) // 4] = "major"
@@ -130,11 +210,12 @@ def _fallback_director(user_prompt: str, arc_fallback: str, max_transitions: int
 
 def _sanitize_out(raw: dict[str, Any], arc_fallback: str, user_prompt: str,
                   max_transitions: int, coherence_hint: float | None) -> dict[str, Any]:
+    allowed_arcs = _allowed_arcs()
     arc = raw.get("arc") or arc_fallback
     if isinstance(arc, str):
         arc = arc.lower().strip()
-    if arc not in ALLOWED_ARCS:
-        arc = arc_fallback if arc_fallback in ALLOWED_ARCS else "build"
+    if arc not in allowed_arcs:
+        arc = arc_fallback if arc_fallback in allowed_arcs else allowed_arcs[0]
 
     text_prompt = raw.get("text_prompt")
     if not isinstance(text_prompt, str) or not text_prompt.strip():
@@ -223,7 +304,8 @@ def run_director(
     a multimodal audio-aware Director (e.g. Qwen2-Audio) is used. The model
     actually hears each clip's first window before producing the JSON plan.
     """
-    arc_fb = arc_preset if arc_preset in ALLOWED_ARCS else "build"
+    arcs = _allowed_arcs()
+    arc_fb = arc_preset if arc_preset in arcs else arcs[0]
     if max_transitions_hint is not None:
         mt = max(1, min(64, max_transitions_hint))
     else:
@@ -248,7 +330,7 @@ def run_director(
             if is_audio_model:
                 out_text = _call_qwen2audio(llm_prompt, audio_clip_paths, model_id)
             else:
-                out_text = _call_hf_instruct(llm_prompt + "\n" + SYSTEM_PROMPT, model_id)
+                out_text = _call_hf_instruct(llm_prompt + "\n" + _system_prompt(), model_id)
             parsed = _extract_json_object(out_text or "")
             if parsed:
                 return _sanitize_out(parsed, arc_fb, user_prompt, mt, coherence_hint)
@@ -298,7 +380,7 @@ def _call_qwen2audio(user_message: str, audio_paths: list[str],
 
     if not audios:
         # No audio loaded — fall back to text path
-        return _call_hf_instruct(user_message + "\n" + SYSTEM_PROMPT,
+        return _call_hf_instruct(user_message + "\n" + _system_prompt(),
                                  "Qwen/Qwen2.5-7B-Instruct")
 
     # Build conversation with one <audio> placeholder per clip
@@ -307,7 +389,7 @@ def _call_qwen2audio(user_message: str, audio_paths: list[str],
         user_content.append({"type": "audio", "audio_url": f"clip_{i}"})
     user_content.append({"type": "text", "text": user_message})
     conversation = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": _system_prompt()},
         {"role": "user", "content": user_content},
     ]
     text = proc.apply_chat_template(conversation, add_generation_prompt=True,
@@ -349,7 +431,7 @@ def _call_hf_instruct(user_message: str, model_id: str) -> str:
             model = model.cpu()
         _LLM_CACHE = (tok, model, model_id)
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": _system_prompt()},
         {"role": "user", "content": user_message},
     ]
     prompt = ""

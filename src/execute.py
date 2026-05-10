@@ -150,7 +150,15 @@ def render_segment(entry: dict, clips_meta: dict[str, dict],
     # Equalize lengths (rubberband can produce slightly different sample counts)
     min_len = min(s.shape[1] for s in processed.values())
     processed = {n: s[:, :min_len] for n, s in processed.items()}
-    full = sum(processed.values()).astype(np.float32)
+    # Instrumental-only mode (Phase 1 default): drop vocals stem from full mix
+    # everywhere, not just overlap. Stems dict still holds vocals so accent
+    # logic / future re-injection paths can reference them.
+    import os
+    inst_only = os.environ.get('AIJOCKEY_INSTRUMENTAL_ONLY', '0') == '1'
+    if inst_only:
+        full = sum(s for n, s in processed.items() if n != 'vocals').astype(np.float32)
+    else:
+        full = sum(processed.values()).astype(np.float32)
     return full, processed
 
 

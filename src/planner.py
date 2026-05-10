@@ -610,6 +610,33 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
             seq.insert(insert_at, callback_entry)
             best.sequence = seq
 
+    # Phrase-quantize segment boundaries at plan time (defense-in-depth;
+    # execute.py also runs a final snap pass). Reject moves >2 bars so we
+    # never silently truncate a section.
+    import os
+    if os.getenv('AIJOCKEY_PHRASE_QUANTIZE', '1') != '0':
+        try:
+            from phrase import snap_to_phrase
+            for e in best.sequence:
+                cm = clips.get(e.clip_id) or {}
+                downbeats = cm.get('downbeats') or []
+                if not downbeats:
+                    continue
+                bpm = float(cm.get('tempo', 120.0)) or 120.0
+                bar_dur = 4.0 * 60.0 / bpm
+                max_drift = 2.0 * bar_dur
+                bpp = int(cm.get('phrase_bars', 8))
+                orig_start = float(e.segment.get('start', 0.0))
+                orig_end = float(e.segment.get('end', 0.0))
+                snap_start = snap_to_phrase(orig_start, downbeats, bars_per_phrase=bpp)
+                snap_end = snap_to_phrase(orig_end, downbeats, bars_per_phrase=bpp)
+                if abs(snap_start - orig_start) <= max_drift:
+                    e.segment['start'] = snap_start
+                if abs(snap_end - orig_end) <= max_drift and snap_end > e.segment['start']:
+                    e.segment['end'] = snap_end
+        except Exception as ex:
+            print(f"warn: planner-stage phrase quantize failed ({ex})")
+
     # Schedule play_at times (cumulative)
     t = 0.0
     for e in best.sequence:

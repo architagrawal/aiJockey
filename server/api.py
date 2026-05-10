@@ -56,9 +56,28 @@ PRESETS = {
     "east_meets_bass": dict(arc="rollercoaster", prompt="sitar tabla deep bass fusion"),
     "bollywood_block_party": dict(arc="build", prompt="bollywood club punjabi drill dancefloor"),
 }
-ARCS = ["build", "peak", "rollercoaster", "descend", "flat_high", "flat_low", "custom"]
+ARCS_FULL = ["build", "peak", "rollercoaster", "descend", "flat_high", "flat_low", "custom"]
+PHASE1_ARCS = ["build", "peak", "flat_low"]
 
-MIN_CLIPS, MAX_CLIPS = 2, 8
+
+def _phase_arcs() -> list[str]:
+    return PHASE1_ARCS if os.environ.get("AIJOCKEY_PHASE", "1") == "1" else ARCS_FULL
+
+
+ARCS = ARCS_FULL  # back-compat for /health response
+
+# Phase A polish input bands. Override via AIJOCKEY_BPM_MIN/MAX.
+BPM_MIN_PHASE1 = float(os.environ.get("AIJOCKEY_BPM_MIN", "100"))
+BPM_MAX_PHASE1 = float(os.environ.get("AIJOCKEY_BPM_MAX", "135"))
+
+def _min_clips() -> int:
+    """Phase 1 plan §1.4: min 3 clips. Below 3, planner has no room."""
+    if os.environ.get("AIJOCKEY_PHASE", "1") == "1":
+        return 3
+    return 2
+
+
+MIN_CLIPS, MAX_CLIPS = _min_clips(), 8
 MIN_DURATION = 30
 MAX_DURATION_HARD = 600
 MAX_FILE_BYTES = 25 * 1024 * 1024
@@ -473,6 +492,7 @@ async def generate(
     seed: int | None = Form(None),
     lufs: float = Form(-9.0),
     export_format: str = Form(EXPORT_MP3),
+    instrumental_only: bool = Form(True),
     x_key: str | None = Header(default=None, alias="X-Key"),
 ):
     global _concurrent_denied
@@ -485,11 +505,23 @@ async def generate(
 
     if preset not in PRESETS and not (prompt and arc):
         raise HTTPException(400, detail=f"unknown preset; valid {list(PRESETS)} or supply prompt+arc")
-    if arc is not None and arc not in ARCS:
-        raise HTTPException(400, detail=f"invalid arc")
+    valid_arcs = _phase_arcs()
+    if arc is not None and arc not in valid_arcs:
+        raise HTTPException(
+            400,
+            detail=f"invalid arc {arc!r}; allowed in current phase: {valid_arcs}",
+        )
 
-    if not (MIN_CLIPS <= len(files) <= MAX_CLIPS):
-        raise HTTPException(400, detail=f"need {MIN_CLIPS}-{MAX_CLIPS} clips")
+    # Phase 1: min 3 clips. If user gave fewer, require library augmentation.
+    min_clips = _min_clips()
+    if len(files) < min_clips and not use_library:
+        raise HTTPException(
+            400,
+            detail=f"need at least {min_clips} clips OR use_library=true to "
+                   f"augment from preanalyzed pool (got {len(files)})",
+        )
+    if not (1 <= len(files) <= MAX_CLIPS):
+        raise HTTPException(400, detail=f"max {MAX_CLIPS} user clips")
 
     acquired = _pipeline_lock.acquire(blocking=False)
     if not acquired:
@@ -510,6 +542,14 @@ async def generate(
             files_payload.append((f.filename or "clip.wav", await f.read()))
 
         def _wrapped():
+            # Stem-swap path already mutes vocals during overlaps; the
+            # instrumental_only toggle additionally suppresses vocals
+            # throughout segment bodies. Implemented as env var read by
+            # execute.py via the existing AIJOCKEY_STEM_SWAP path.
+            if instrumental_only:
+                os.environ["AIJOCKEY_INSTRUMENTAL_ONLY"] = "1"
+            else:
+                os.environ.pop("AIJOCKEY_INSTRUMENTAL_ONLY", None)
             return _run_generate_sync(
                 job_id=job_id,
                 preset=preset,
