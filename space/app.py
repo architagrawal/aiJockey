@@ -32,7 +32,7 @@ ARCS = ["build", "peak", "flat_low"]
 LUFS_OPTIONS = {"streaming (-14)": -14, "club (-9)": -9, "competition (-6)": -6}
 
 MIN_CLIPS, MAX_CLIPS = 2, 8
-MIN_DURATION, MAX_DURATION_HARD = 30, 600
+MIN_DURATION, MAX_DURATION_HARD = 30, 1800
 BACKEND_TIMEOUT_SEC = 1200
 MAX_FILE_MB = 75
 MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024

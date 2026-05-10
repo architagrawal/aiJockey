@@ -107,7 +107,7 @@ def _min_clips() -> int:
 
 MIN_CLIPS, MAX_CLIPS = _min_clips(), 8
 MIN_DURATION = 30
-MAX_DURATION_HARD = 600
+MAX_DURATION_HARD = int(os.environ.get("AIJOCKEY_MAX_DURATION", "1800"))
 MAX_FILE_BYTES = int(os.environ.get("AIJOCKEY_MAX_FILE_MB", "75")) * 1024 * 1024
 LIBRARY_MAX_PICK = 12
 ALLOWED_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
@@ -1214,7 +1214,12 @@ async def generate(
 
     # cli['arc'] / cli['prompt'] / cli['lufs'] override locals when supplied.
     if cli_overrides.get("arc"):
-        arc = cli_overrides["arc"]
+        wanted_arc = cli_overrides["arc"]
+        # Phase 1 fallback: dj_set preset wants tomorrowland; map to peak
+        # if not in current phase's allowed list.
+        if wanted_arc not in valid_arcs:
+            wanted_arc = "peak" if "peak" in valid_arcs else valid_arcs[0]
+        arc = wanted_arc
     if cli_overrides.get("prompt"):
         prompt = cli_overrides["prompt"]
     if cli_overrides.get("lufs") is not None:
