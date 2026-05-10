@@ -93,9 +93,13 @@ def call_backend(files, preset_label, duration, use_library,
         path = f.name if hasattr(f, "name") else f
         multipart.append(("files", (Path(path).name, open(path, "rb"), "audio/wav")))
 
+    # mix_mode replaces raw use_library boolean. tight = no library;
+    # balanced (default) + exploratory progressively allow library augmentation.
+    # Backwards-compat: if caller still passes use_library=False, force tight.
     data = {
         "preset": slug,
         "duration": str(int(duration)),
+        "mix_mode": "tight" if not use_library else "balanced",
         "use_library": "true" if use_library else "false",
         "lufs": str(LUFS_OPTIONS.get(lufs_label, -9)),
         "export_format": EXPORT_FORMATS.get(export_label, "mp3"),
@@ -129,12 +133,41 @@ def call_backend(files, preset_label, duration, use_library,
 
     job_ref = r.headers.get("X-Job-Id", "")
     warn = r.headers.get("X-Ingest-Warnings")
+    probe_hdr = r.headers.get("X-Probe", "")
+    critic_hdr = r.headers.get("X-Critic", "")
+    clips_hdr = r.headers.get("X-Clips-Used", "")
     out = tempfile.NamedTemporaryFile(suffix=suf, delete=False)
     out.write(r.content)
     out.close()
     extra = f" job_id={job_ref}" if job_ref else ""
     if warn:
         extra += f"\n\nIngest note: {warn}"
+    # Surface auto-quality signals to user — gives them a reason to trust
+    # (or not) the mix without listening end-to-end.
+    if probe_hdr:
+        try:
+            import json as _j
+            p = _j.loads(probe_hdr)
+            extra += (f"\n\nAuto-quality probe: verdict={p.get('verdict')} "
+                      f"severity={p.get('overall_severity')} "
+                      f"junctions={p.get('n_junctions')}")
+        except Exception:
+            pass
+    if critic_hdr:
+        try:
+            import json as _j
+            c = _j.loads(critic_hdr)
+            extra += f"\nCriticV2 score: {c.get('score')}"
+        except Exception:
+            pass
+    if clips_hdr:
+        try:
+            import json as _j
+            cu = _j.loads(clips_hdr)
+            extra += (f"\nPool: {cu.get('user_count', 0)} user + "
+                      f"{cu.get('library_count', 0)} library clips")
+        except Exception:
+            pass
     return (
         out.name,
         f"OK · preset={preset_label} · duration={int(duration)}s · export={EXPORT_FORMATS.get(export_label, 'mp3')}{extra}",

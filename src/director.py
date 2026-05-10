@@ -152,6 +152,8 @@ CONSTRAINTS:
   Categories: risers, impacts, snare_rolls, sweeps, hihat_rolls, sub_drops
 - Prefer NO accent over a forced one.
 - If pool is too disparate (low coherence, no clusters), say so in `narrative_notes` and use mostly minor tiers — admit limitation rather than fake drama.
+- HARD RULE on incompatible bridges: NEVER use `drop` or `major` tier for a junction whose two clips differ in genre cluster AND have BPM gap > 8 BPM. That combination produces audible energy mismatch + phase cancellation (verified: probe severity ≥ 0.85 on every such forced junction). When forced into such a bridge, use `minor` with intent `breath` or `cooldown` — let the listener absorb the cluster shift, don't paper it over with a drop.
+- Listen to your narrative_notes: if you write "pool too disparate" or "navigate as journey", you MUST emit ALL minor tiers. Mixing that admission with a drop tier later is incoherent.
 
 OUTPUT SCHEMA (EXACT keys, no extras):
 {

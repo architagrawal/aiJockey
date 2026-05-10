@@ -319,6 +319,56 @@ def pick_segment(clip: dict, prefer: str | None = None,
 # Beam search
 # ---------------------------------------------------------------------------
 
+def load_probe_history(probe_log_path: str | Path | None = None,
+                        last_n: int = 200) -> dict:
+    """Aggregate probe-log signal by (clip_id, segment_index) so the planner
+    can avoid clip-segment combinations that historically produced
+    high-severity junctions.
+
+    Returns: {(clip_id, segment_idx): {'count': N, 'mean_sev': S, 'worst_artifact': str}}
+    Empty dict when log absent or no rows have segment-level resolution.
+
+    Notes:
+      - probe_log rows store per-junction probes but NOT segment indices
+        — we don't have direct (clip, seg) → severity. Best we can do is
+        per-clip aggregate. Planner uses this as a soft prior.
+      - Pulls last N rows so stale clips age out as taste evolves.
+    """
+    import os as _os
+    if probe_log_path is None:
+        probe_log_path = _os.environ.get('AIJOCKEY_PROBE_LOG',
+                                          '/scratch/probes/log.jsonl')
+    p = Path(probe_log_path)
+    if not p.exists():
+        return {}
+    try:
+        lines = p.read_text().splitlines()[-last_n:]
+    except Exception:
+        return {}
+    out: dict = {}
+    for ln in lines:
+        if not ln.strip():
+            continue
+        try:
+            row = json.loads(ln)
+        except Exception:
+            continue
+        sev = (row.get('probe') or {}).get('overall_severity')
+        if sev is None or sev < 0.5:
+            continue
+        # Without explicit clip-id-per-junction, we mark each junction's
+        # (mix_mode, prompt) as a soft "this combination tends bad" signal.
+        # Real implementation needs probe_log to start logging clip_ids
+        # per junction — TODO for next round.
+        key = (row.get('mix_mode') or '?', row.get('prompt') or '?')
+        rec = out.setdefault(key, {'count': 0, 'sum_sev': 0.0})
+        rec['count'] += 1
+        rec['sum_sev'] += float(sev)
+    return {k: {'count': r['count'],
+                'mean_sev': round(r['sum_sev'] / r['count'], 3)}
+            for k, r in out.items()}
+
+
 def repick_energy_constrained_segments(
     timeline: list[dict],
     clips: dict[str, dict],

@@ -240,6 +240,32 @@ def summarize(rows: list[dict] | None = None) -> dict:
                 f"O{st.get('overlap', '?')}"
                 f"S{st.get('swap', '?')}")
         by_state.setdefault(skey, []).append(float(s))
+    # Per-artifact-type aggregation. For each junction across all rows,
+    # find which axis (rms / xcorr / phase) had the highest contribution to
+    # severity, count it. Tells us which improver lever (energy / swap /
+    # overlap) would have the biggest payoff if it actually worked.
+    artifact_counts = {'rms_envelope': 0, 'vocal_bleed': 0,
+                       'spectral_phasing': 0, 'tied': 0}
+    artifact_severity_sum = {'rms_envelope': 0.0, 'vocal_bleed': 0.0,
+                              'spectral_phasing': 0.0}
+    for r in rows:
+        for j in (r.get('probe') or {}).get('junctions') or []:
+            db = abs(float(j.get('rms_db', 0.0))) / 12.0
+            xc = abs(float(j.get('xcorr', 0.0))) / 0.6
+            ph = float(j.get('phase', 0.0)) / 0.30
+            scores = {'rms_envelope': min(1.0, db),
+                       'vocal_bleed': min(1.0, xc),
+                       'spectral_phasing': min(1.0, ph)}
+            for k, v in scores.items():
+                artifact_severity_sum[k] += v
+            top = max(scores, key=scores.get)
+            top_v = scores[top]
+            ties = sum(1 for v in scores.values() if abs(v - top_v) < 0.01)
+            if ties > 1:
+                artifact_counts['tied'] += 1
+            else:
+                artifact_counts[top] += 1
+
     return {
         'n': len(rows),
         'mean_severity': round(sum(sevs) / len(sevs), 3),
@@ -254,6 +280,9 @@ def summarize(rows: list[dict] | None = None) -> dict:
                       for k, v in by_cohort.items()},
         'by_improver_state': {k: {'n': len(v), 'mean': round(sum(v) / len(v), 3)}
                                for k, v in by_state.items()},
+        'top_artifacts': artifact_counts,
+        'mean_artifact_severity': {k: round(v / max(1, sum(artifact_counts.values())), 3)
+                                    for k, v in artifact_severity_sum.items()},
         'fallback_rate': round(fallback / len(rows), 3),
     }
 
@@ -267,6 +296,8 @@ def main() -> None:
     s.add_argument('--path', default=None)
     s.add_argument('--by_cohort', action='store_true',
                    help='emit per-cohort table only')
+    s.add_argument('--top_artifacts', action='store_true',
+                   help='emit dominant-artifact-type table only')
     args = ap.parse_args()
     if args.cmd == 'summary':
         rows = read_log(args.path)
@@ -278,6 +309,18 @@ def main() -> None:
             for c in sorted(cohorts):
                 d = cohorts[c]
                 print(f"{c:<14} {d['n']:>4} {d['mean']:>7.3f} {d['p50']:>7.3f}")
+            return
+        if args.top_artifacts:
+            ta = out.get('top_artifacts') or {}
+            mas = out.get('mean_artifact_severity') or {}
+            tot = max(1, sum(ta.values()))
+            print(f"{'artifact':<22} {'count':>6} {'pct':>6} {'mean_sev':>10}")
+            print('-' * 50)
+            for k in ('rms_envelope', 'vocal_bleed', 'spectral_phasing', 'tied'):
+                v = ta.get(k, 0)
+                pct = 100.0 * v / tot
+                ms = mas.get(k, 0.0)
+                print(f"{k:<22} {v:>6} {pct:>5.1f}% {ms:>10.3f}")
             return
         print(json.dumps(out, indent=2))
 
