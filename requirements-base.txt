@@ -9,10 +9,9 @@ pyrubberband>=0.4.0
 pyloudnorm==0.1.1
 # CLAP backend: laion-clap preferred but fails to build on Python 3.12.
 # Fallback uses transformers.ClapModel (same model). clap_wrapper.py picks one.
-# 4.43+ minimum for Qwen2-Audio multimodal Director.
-# 4.51+ required when text Director defaults to Qwen3-8B-Instruct.
-# trl/peft pull compatible transformers transitively but pin minimum here.
-transformers>=4.51.0
+# 4.43+ minimum for Qwen2-Audio multimodal Director (current default).
+# Bump to 4.51+ when adopting Qwen3-4B-Instruct-2507 / 235B-A22B (newer arch).
+transformers>=4.43.0
 laion-clap==1.1.4 ; python_version < "3.12"
 scipy>=1.11
 numpy<2.0

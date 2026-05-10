@@ -401,7 +401,13 @@ def run_director(
         if audio_clip_paths:
             default_model = "Qwen/Qwen2-Audio-7B-Instruct"
         else:
-            default_model = "Qwen/Qwen3-8B-Instruct"
+            # Qwen3-8B-Instruct does not exist on HF (verified 401). Real
+            # Qwen3 text-instruct models: Qwen3-4B-Instruct-2507 (small)
+            # or Qwen3-235B-A22B-Instruct-2507 (MoE, needs QLoRA on
+            # 192GB VRAM). Default = Qwen2.5-7B-Instruct (proven, fast).
+            # Set HF_DIRECTOR_MODEL=Qwen/Qwen3-4B-Instruct-2507 to test
+            # newer family.
+            default_model = "Qwen/Qwen2.5-7B-Instruct"
         model_id = os.environ.get("HF_DIRECTOR_MODEL", default_model)
         is_audio_model = "audio" in model_id.lower() and audio_clip_paths
         # Pool intelligence: inject a clip-by-clip inventory so Director
