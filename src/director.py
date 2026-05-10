@@ -352,6 +352,30 @@ def _sanitize_out(raw: dict[str, Any], arc_fallback: str, user_prompt: str,
                       f"{len(pick)} minors → major at indices {pick} "
                       f"(was {cur_minor}/{n} minor, max_allowed {max_minor})")
 
+        # FORCE DROP for build/peak arcs: AI sets need a climax. If
+        # arc=build|peak and 0 drops emitted, promote 1 major near the
+        # 60-75% position (arc peak zone) to drop tier. Disable with
+        # AIJOCKEY_DIRECTOR_FORCE_DROP=0.
+        if (os.environ.get("AIJOCKEY_DIRECTOR_FORCE_DROP", "1") != "0"
+                and arc in ("build", "peak") and n >= 6
+                and not any(t == "drop" for t in tiers)):
+            # Promote highest-index major in [int(0.55*n), int(0.80*n)] to drop
+            zone_lo = max(1, int(0.55 * n))
+            zone_hi = min(n - 1, int(0.80 * n))
+            target_idx = -1
+            for j in range(zone_hi, zone_lo - 1, -1):
+                if tiers[j] == "major":
+                    target_idx = j; break
+            if target_idx < 0:  # promote any minor in zone
+                for j in range(zone_hi, zone_lo - 1, -1):
+                    if tiers[j] == "minor":
+                        target_idx = j; break
+            if target_idx >= 0:
+                old_tier = tiers[target_idx]
+                tiers[target_idx] = "drop"
+                print(f"[director] force_drop: promoted {old_tier} → drop "
+                      f"at junction {target_idx} (arc={arc} peak zone)")
+
     accents: list[dict[str, Any]] = []
     ah = raw.get("accent_hints")
     if isinstance(ah, list):
@@ -366,6 +390,30 @@ def _sanitize_out(raw: dict[str, Any], arc_fallback: str, user_prompt: str,
             fx = str(item.get("fx_category", "hihat_rolls"))
             beats = float(item.get("beats", 2.0))
             accents.append({"junction_index": ji, "fx_category": fx, "beats": beats})
+
+    # AUTO-INJECT accents on major/drop junctions when LLM emitted none.
+    # AI sets need risers + impacts to sound climactic — Director's LLM
+    # tends to leave accent_hints empty. Force-add when missing.
+    # Disable with AIJOCKEY_DIRECTOR_AUTO_ACCENT=0.
+    if (os.environ.get("AIJOCKEY_DIRECTOR_AUTO_ACCENT", "1") != "0"
+            and not accents and tiers):
+        existing_ji = set()
+        for j_idx, t in enumerate(tiers):
+            if t == "drop":
+                # Riser ramp BEFORE drop (8 beats), impact ON drop (1 beat)
+                accents.append({"junction_index": j_idx,
+                                "fx_category": "risers", "beats": 8.0})
+                accents.append({"junction_index": j_idx,
+                                "fx_category": "impacts", "beats": 1.0})
+                existing_ji.add(j_idx)
+            elif t == "major" and j_idx not in existing_ji:
+                # Snare roll ramp BEFORE major (4 beats)
+                accents.append({"junction_index": j_idx,
+                                "fx_category": "snare_rolls", "beats": 4.0})
+                existing_ji.add(j_idx)
+        if accents:
+            print(f"[director] auto_accent: injected {len(accents)} accent_hints "
+                  f"on major/drop junctions (LLM left empty)")
 
     # Phase 1: cap accents at 2 per junction to avoid pile-on. This matches
     # the constitutional `accent_budget` rule and gives Director-level defense.
