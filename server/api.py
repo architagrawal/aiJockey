@@ -839,6 +839,51 @@ async def generate(
                     "library_ids": sorted(lib_ids)[:20],
                 }
                 headers["X-Clips-Used"] = json.dumps(clips_used)[:1900]
+
+                # Cheap audio probes — auto-quality report on every render.
+                # RMS env mismatch / vocal-bleed xcorr / spectral phasing per
+                # junction, ~70% of artifacts at ~1% the cost of an audio LLM.
+                # Adds ~100-300ms wall on a 3min mix; skipped when output WAV
+                # not co-located with timeline (e.g. mp3 streamed before wav
+                # finalize).
+                try:
+                    import sys as _sys
+                    _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+                    from audio_probes import probe_mix  # type: ignore
+                    wav_for_probe = None
+                    if Path(artifact).suffix.lower() == ".wav":
+                        wav_for_probe = str(artifact)
+                    else:
+                        wav_alt = Path(artifact).with_suffix(".wav")
+                        if wav_alt.exists():
+                            wav_for_probe = str(wav_alt)
+                    if wav_for_probe:
+                        probe_t0 = time.perf_counter()
+                        probe = probe_mix(wav_for_probe, str(tl_p))
+                        probe_ms = int((time.perf_counter() - probe_t0) * 1000)
+                        # Header: compact summary (full per-junction in
+                        # /jobs/{id}/probe later if needed).
+                        worst = max(probe.get("junctions") or [],
+                                    key=lambda r: r.get("overall_severity", 0),
+                                    default=None)
+                        summary = {
+                            "verdict": probe["verdict"],
+                            "overall_severity": probe["overall_severity"],
+                            "n_junctions": probe["n_junctions"],
+                            "worst_junction": (
+                                {"j": worst["junction_index"],
+                                 "t": worst["time_sec"],
+                                 "sev": worst["overall_severity"]}
+                                if worst else None),
+                            "probe_ms": probe_ms,
+                        }
+                        headers["X-Probe"] = json.dumps(summary)[:1900]
+                        jlog(job_id, "probe", probe_ms,
+                             verdict=probe["verdict"],
+                             severity=probe["overall_severity"])
+                except Exception as e:
+                    # Probes are advisory — never fail the response on probe errors.
+                    jlog(job_id, "probe_skip", 0, err=str(e)[:200])
         except Exception:
             pass
 

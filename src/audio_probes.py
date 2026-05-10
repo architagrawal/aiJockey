@@ -151,18 +151,32 @@ def probe_mix(wav_path: str, timeline_path: str | None = None,
     if timeline_path and Path(timeline_path).exists():
         try:
             blob = json.load(open(timeline_path))
-            tl = blob.get('timeline') or blob
-            cursor = 0
+            if isinstance(blob, dict):
+                tl = blob.get('timeline') or []
+            elif isinstance(blob, list):
+                tl = blob
+            else:
+                tl = []
+            # Render uses post-overlap durations, not raw segment durations.
+            # Cumulative segment duration overshoots actual rendered length
+            # because each transition consumes overlap_n samples from BOTH
+            # sides. Compute scale = audio_len / cumulative_seg_len and
+            # apply uniformly. Junctions land at scaled cumulative cursor.
+            seg_durs = []
             for entry in tl:
                 seg = entry.get('segment') or {}
-                seg_dur = float(seg.get('end', 0)) - float(seg.get('start', 0))
-                if seg_dur <= 0:
-                    continue
-                cursor += int(seg_dur * sr)
-                if 0 < cursor < len(audio):
-                    junctions.append(cursor)
-            if junctions:
-                junctions = junctions[:-1]  # last cursor is end of mix, not a junction
+                d = float(seg.get('end', 0)) - float(seg.get('start', 0))
+                if d > 0:
+                    seg_durs.append(d)
+            if seg_durs:
+                cum_total = sum(seg_durs)
+                scale = (len(audio) / sr) / cum_total if cum_total > 0 else 1.0
+                cursor_sec = 0.0
+                for i, d in enumerate(seg_durs[:-1]):  # n-1 junctions for n segments
+                    cursor_sec += d
+                    pos = int(cursor_sec * scale * sr)
+                    if 0 < pos < len(audio):
+                        junctions.append(pos)
         except Exception as e:
             print(f"[probe] timeline parse failed ({e}); falling back to envelope")
     if not junctions:
