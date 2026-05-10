@@ -236,6 +236,28 @@ def cmd_execute(args: argparse.Namespace) -> None:
         execute(edited_path, args.cache, out_improved, args.samples)
         args.timeline = edited_path
         args.out = out_improved
+        # Probe the improved render + log so A/B has post-improvement data.
+        try:
+            post = probe_mix(args.out, args.timeline)
+            log_render(
+                job_id=f'cli_improver_p{pass_i + 1}_{int(_time.time())}',
+                prompt=(_json.load(open(args.timeline))
+                        if isinstance(_json.load(open(args.timeline)), dict)
+                        else {}).get('meta', {}).get('prompt'),
+                duration_actual_s=post.get('duration_sec'),
+                render_time_s=None,
+                probe=post,
+                improver={'pass': pass_i + 1,
+                          'edits': [{'j': e.junction_index, 'a': e.action}
+                                    for e in report.edits],
+                          'severity_before': probe['overall_severity'],
+                          'severity_after': post['overall_severity']},
+            )
+            print(f"[improver] pass {pass_i + 1} after: severity="
+                  f"{post['overall_severity']:.2f} "
+                  f"(delta={post['overall_severity'] - probe['overall_severity']:+.2f})")
+        except Exception as _e:
+            print(f"[improver] post-probe log skipped ({_e})")
     print(f"[improver] final mix: {args.out}")
 
 
