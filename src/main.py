@@ -504,7 +504,7 @@ def main() -> None:
                    help='min distinct clips that must appear in mix')
     p.add_argument('--arc', default='build',
                    choices=['build', 'peak', 'rollercoaster',
-                            'descend', 'flat_high', 'flat_low', 'custom'],
+                            'descend', 'flat_high', 'flat_low', 'tomorrowland', 'custom'],
                    help='energy arc shape (planner intent)')
     p.add_argument('--style_rag', default=None,
                    help='reference dir for Style-RAG bias (optional)')
@@ -571,7 +571,7 @@ def main() -> None:
                    help='min distinct clips that must appear in mix')
     p.add_argument('--arc', default='build',
                    choices=['build', 'peak', 'rollercoaster',
-                            'descend', 'flat_high', 'flat_low', 'custom'],
+                            'descend', 'flat_high', 'flat_low', 'tomorrowland', 'custom'],
                    help='energy arc shape (planner intent)')
     p.add_argument('--lufs', type=float, default=-9.0)
     p.add_argument('--style_rag', default=None,
