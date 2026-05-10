@@ -61,10 +61,13 @@ def _phrase_bars_for_clip(meta: dict) -> int:
 
 def enforce_min_segment_length(timeline: list[dict],
                                 clips_meta: dict[str, dict],
-                                min_bars: int = 16) -> list[dict]:
+                                min_bars: int = 8) -> list[dict]:
     """Extend any segment shorter than min_bars (at clip BPM) by walking
-    forward in the clip via downbeats. Prevents 0.5-2s segments that get
-    fully consumed by overlap windows (STATUS bug #1 root cause).
+    forward in the clip via downbeats. Prevents tiny (<8 bar) segments
+    that get fully consumed by overlap windows (STATUS bug #1 root cause).
+
+    Only patches the truly tiny ones — segments already >= min_bars are
+    left alone so planner duration targets stay honored.
     """
     for entry in timeline:
         cid = entry.get('clip_id')
@@ -674,7 +677,7 @@ def execute(timeline_path: str, cache_dir: str, out_path: str,
     # Enforce minimum segment length BEFORE phrase quantize. Stops short
     # segments (0.5-2s) from being fully consumed by overlap windows —
     # the root of STATUS bug #1 'render duration shortfall'.
-    min_bars = int(os.getenv('AIJOCKEY_MIN_SEGMENT_BARS', '16'))
+    min_bars = int(os.getenv('AIJOCKEY_MIN_SEGMENT_BARS', '8'))
     before_lens = [e['segment'].get('end', 0) - e['segment'].get('start', 0) for e in tl]
     enforce_min_segment_length(tl, clips_meta, min_bars=min_bars)
     extended = sum(1 for e in tl if e.get('segment', {}).get('min_length_extended'))
