@@ -304,9 +304,18 @@ def render_segments_dataframe(timeline_json):
     return rows
 
 
+# Friendly display names for non-obvious clip stems (test_clips pool).
+_DISPLAY_NAME_OVERRIDES = {
+    "test1": "Kanye West — Stronger",
+    "test2": "The Weeknd",
+}
+
+
 def _shorten_sample_name(stem: str) -> str:
     """Strip YouTube IDs / verbose suffixes for cleaner UI labels."""
     import re
+    if stem in _DISPLAY_NAME_OVERRIDES:
+        return _DISPLAY_NAME_OVERRIDES[stem]
     s = stem
     s = re.sub(r"__[A-Za-z0-9_-]{8,}$", "", s)
     s = re.sub(r"_Official_Music_Video.*$", "", s, flags=re.IGNORECASE)
@@ -614,11 +623,15 @@ CSS = """
 }
 /* Sample-clip CheckboxGroup: scrollable inside its own panel so the page
    stays anchored. Targets the inner wrap-block of the component. */
-.aij-pool-scroll {max-height: 260px; overflow-y: auto !important;}
+.aij-pool-scroll {max-height: 460px; overflow-y: auto !important;}
 .aij-pool-scroll .wrap, .aij-pool-scroll > div {
-    max-height: 260px !important; overflow-y: auto !important;
+    max-height: 460px !important; overflow-y: auto !important;
 }
 .aij-pick-hint {color: #94a3b8 !important; font-size: 12px !important;}
+/* Wider canvas + better column distribution. Default Gradio container is
+   narrow; bump max-width and force two-col layout to actually breathe. */
+.gradio-container {max-width: 1500px !important;}
+.aij-card-output {padding: 12px 0;}
 """
 
 THEME = gr.themes.Base(
@@ -726,9 +739,9 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
             visible=True)
 
         with gr.Group(visible=False) as render_panel:
-          with gr.Row(variant="panel"):
+          with gr.Row(variant="panel", equal_height=False):
             # Left column: controls
-            with gr.Column(scale=2, min_width=320):
+            with gr.Column(scale=5, min_width=440):
                 gr.Markdown("### 1 · Clips")
                 files = gr.File(file_count="multiple", file_types=["audio"],
                                 label=f"upload {MIN_CLIPS}–{MAX_CLIPS} audio files (≤75 MB each)")
@@ -741,7 +754,7 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
                     elem_classes="aij-pick-hint")
                 with gr.Accordion(
                         "vocal-heavy clips (Despacito, Taki Taki, "
-                        "All The Stars, Waka Waka, test1, test2)",
+                        "All The Stars, Waka Waka, Kanye, Weeknd)",
                         open=True):
                     sample_picks_vocal = gr.CheckboxGroup(
                         choices=_initial_pools["vocal"],
@@ -749,7 +762,7 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
                         elem_classes="aij-pool-scroll")
                 with gr.Accordion(
                         "instrumental clips · 40 from Internet Archive · CC",
-                        open=False):
+                        open=True):
                     sample_picks_instr = gr.CheckboxGroup(
                         choices=_initial_pools["instrumental"],
                         label="",
@@ -816,7 +829,7 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
                                          variant="primary", size="lg")
 
             # Right column: output
-            with gr.Column(scale=3, min_width=400):
+            with gr.Column(scale=7, min_width=560):
                 gr.Markdown("### Output")
                 out_audio = gr.Audio(label="mastered mix", autoplay=True,
                                      type="filepath",
@@ -836,7 +849,12 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
                     label="sequence",
                     interactive=False, wrap=True, row_count=(0, "dynamic"))
 
-                gr.Markdown("### Audiobox aesthetics — reference-free quality (0–10)")
+                gr.Markdown(
+                    "### Audiobox aesthetics — reference-free quality (0–10)\n"
+                    "_Meta's pretrained quality model. Renders as 4-bar chart "
+                    "after generation. If empty: model not loaded on droplet "
+                    "(install via `pip install audiobox-aesthetics` or set "
+                    "`AIJOCKEY_AUDIOBOX_AESTHETICS=0`)._")
                 audiobox_plot = gr.Plot(label="4-axis quality score")
 
         generate.click(call_backend,

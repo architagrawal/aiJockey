@@ -1696,7 +1696,7 @@ async def generate(
                         # Opt-in via AIJOCKEY_AUDIOBOX_AESTHETICS=1; degrades
                         # silently when package missing or env off.
                         try:
-                            from audiobox_aesthetics import (
+                            from audiobox_critic import (
                                 enabled as _aae_enabled,
                                 score as _aae_score,
                                 severity_proxy as _aae_sev,
