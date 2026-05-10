@@ -569,14 +569,12 @@ def _call_hf_instruct(user_message: str, model_id: str) -> str:
 
 
 def estimate_max_transitions_for_pool(n_clips: int, duration_sec: float) -> int:
-    """Realistic transition count = duration / mean-segment-length. A typical
-    DJ-style segment runs 30-60s post-overlap, so duration/45 is a good
-    central estimate. Capped at 16 so Director doesn't have to plan
-    transitions that the planner won't actually use (planner picks
-    ~10-15 segments for normal mixes); large estimates also blow past
-    LLM context with the pool inventory injected.
+    """Realistic transition count given the planner picks segments around
+    20-30s post-overlap. duration/20 is the upper estimate; capped at 16
+    so Director does not exhaust LLM context with the pool inventory
+    injected. Floor at 8 so short user prompts still get enough variety.
     """
     if duration_sec <= 0:
         return 8
-    target = max(4, int(duration_sec / 45))
+    target = max(8, int(duration_sec / 20))
     return min(16, target)
