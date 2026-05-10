@@ -508,16 +508,20 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
     name = tech.get('name', 'crossfade')
     bars = int(tech.get('bars', 16))
     beat_dur = 60.0 / max(target_bpm, 1.0)
-    # Clamp overlap to half of the SHORTER side (incoming OR outgoing tail).
-    # Without this, a 16-bar (~30s) overlap on a 2s segment over-consumes
-    # the audio and the rendered output collapses far below planned length
-    # (STATUS bug #1). Floor at 1 bar to keep transitions audible.
+    # Clamp overlap to ONE THIRD of the shorter side (incoming OR outgoing
+    # tail). Each segment then contributes ~67% unique audio post-handoff
+    # instead of being consumed in half. 1-bar floor keeps transitions
+    # audible; absolute cap at 8 bars (~16s at 120 BPM) prevents long
+    # overlaps from eating the whole mix even when both sides are long.
     cur_len = cur['full'].shape[1]
     out_len = output.shape[1]
-    max_overlap_samples = max(int(beat_dur * 4 * SR),  # 1 bar floor
-                               min(cur_len, out_len) // 2)
+    bar_samples = int(beat_dur * 4 * SR)
+    abs_cap_samples = 8 * bar_samples
+    max_overlap_samples = max(bar_samples,
+                               min(cur_len, out_len) // 3)
+    max_overlap_samples = min(max_overlap_samples, abs_cap_samples)
     overlap_n = min(int(bars * 4 * beat_dur * SR), max_overlap_samples)
-    actual_bars = overlap_n / max(beat_dur * 4 * SR, 1)
+    actual_bars = overlap_n / max(bar_samples, 1)
     if actual_bars < bars:
         # Reflect the clamp into tech dict so downstream FX (riser length,
         # accent placement) align with the real overlap window.
