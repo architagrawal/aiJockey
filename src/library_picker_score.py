@@ -349,6 +349,247 @@ def arc_bpm_score(cand_bpm: float, arc: str, position: float,
     return max(-1.0, 1.0 - diff / spread)
 
 
+# ---------------------------------------------------------------------------
+# #1c — Audiobox feedback rerank (closed-loop quality signal)
+# ---------------------------------------------------------------------------
+# State: per-clip running mean of mix-level Audiobox PQ across renders the
+# clip appeared in. Cheap approximation of leave-one-out PQ delta — uses
+# overall mix PQ as a credit signal instead of computing N renders per pick.
+# Storage: simple JSON sidecar at $AIJOCKEY_AUDIOBOX_HISTORY (default
+# /scratch/picker_history/audiobox.json). Updated after each render.
+
+import json
+from pathlib import Path
+
+
+def _audiobox_history_path() -> Path:
+    p = os.environ.get('AIJOCKEY_AUDIOBOX_HISTORY')
+    if p:
+        return Path(p)
+    for cand in (Path('/scratch/picker_history/audiobox.json'),
+                  Path('/workspace/scratch/picker_history/audiobox.json'),
+                  Path('./.aijockey/audiobox_history.json')):
+        try:
+            cand.parent.mkdir(parents=True, exist_ok=True)
+            return cand
+        except Exception:
+            continue
+    return Path('./audiobox_history.json')
+
+
+def _load_audiobox_history() -> dict:
+    """Returns {clip_id: {'count': int, 'pq_sum': float, 'ce_sum': float, ...}}."""
+    p = _audiobox_history_path()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {}
+
+
+def _save_audiobox_history(data: dict) -> None:
+    p = _audiobox_history_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + '.tmp')
+    tmp.write_text(json.dumps(data, indent=2))
+    os.replace(tmp, p)
+
+
+def record_audiobox_render(clip_ids: list[str], aesthetics: dict | None) -> None:
+    """Update per-clip running stats after a render. aesthetics is a dict
+    with keys PQ/PC/CE/CU (per audiobox_aesthetics.score()). Skips silently
+    when aesthetics None or no clip_ids."""
+    if not aesthetics or not clip_ids:
+        return
+    hist = _load_audiobox_history()
+    for cid in clip_ids:
+        entry = hist.setdefault(cid, {'count': 0, 'pq_sum': 0.0,
+                                        'ce_sum': 0.0, 'pc_sum': 0.0, 'cu_sum': 0.0})
+        entry['count'] += 1
+        entry['pq_sum'] += float(aesthetics.get('PQ', 0.0))
+        entry['ce_sum'] += float(aesthetics.get('CE', 0.0))
+        entry['pc_sum'] += float(aesthetics.get('PC', 0.0))
+        entry['cu_sum'] += float(aesthetics.get('CU', 0.0))
+    try:
+        _save_audiobox_history(hist)
+    except Exception as e:
+        print(f"[audiobox_history] save failed: {e}")
+
+
+def audiobox_lift_term(clip_id: str, axes: tuple[str, ...] = ('PQ', 'CE'),
+                        baseline: float = 6.0,
+                        strength: float = 0.25) -> float:
+    """Bonus from clip's historical mix-level Audiobox mean.
+
+    Cheap proxy for leave-one-out PQ delta — uses cumulative PQ/CE means
+    of all renders this clip appeared in, vs a `baseline` (default 6.0
+    on Audiobox 0-10 scale). Boost up to `strength` when mean above
+    baseline, penalty down to -strength when below.
+
+    Returns 0 when clip never seen (cold-start neutral).
+    """
+    hist = _load_audiobox_history()
+    entry = hist.get(clip_id)
+    if not entry or entry.get('count', 0) == 0:
+        return 0.0
+    n = max(1, int(entry['count']))
+    means = []
+    for axis in axes:
+        key = f'{axis.lower()}_sum'
+        if key in entry:
+            means.append(entry[key] / n)
+    if not means:
+        return 0.0
+    avg = sum(means) / len(means)
+    # avg=baseline → 0; avg=baseline+2 → +strength; avg=baseline-2 → -strength
+    return float(strength * max(-1.0, min(1.0, (avg - baseline) / 2.0)))
+
+
+# ---------------------------------------------------------------------------
+# #4 — Probe-failure exclusion / blame decay
+# ---------------------------------------------------------------------------
+# When a junction's probe severity > threshold, BOTH clips at that junction
+# get partial blame. Penalty decays linearly over `decay_renders` future
+# renders. Storage: same JSON sidecar shape as audiobox.
+
+def _blame_history_path() -> Path:
+    p = os.environ.get('AIJOCKEY_BLAME_HISTORY')
+    if p:
+        return Path(p)
+    for cand in (Path('/scratch/picker_history/blame.json'),
+                  Path('/workspace/scratch/picker_history/blame.json'),
+                  Path('./.aijockey/blame_history.json')):
+        try:
+            cand.parent.mkdir(parents=True, exist_ok=True)
+            return cand
+        except Exception:
+            continue
+    return Path('./blame_history.json')
+
+
+def _load_blame() -> dict:
+    p = _blame_history_path()
+    if not p.exists():
+        return {'global_render_counter': 0, 'clips': {}}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {'global_render_counter': 0, 'clips': {}}
+
+
+def _save_blame(data: dict) -> None:
+    p = _blame_history_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + '.tmp')
+    tmp.write_text(json.dumps(data, indent=2))
+    os.replace(tmp, p)
+
+
+def record_probe_failures(junctions: list[dict],
+                          severity_threshold: float = 0.6) -> None:
+    """For each junction with severity > threshold, increment blame on both
+    participating clip_ids. Junctions are dicts with at least
+    {prev_clip_id, cur_clip_id, severity}.
+
+    Partial credit: each clip gets +0.5 blame per flagged junction (so a
+    clip in 2 bad junctions accumulates 1.0). Decay handled at read time.
+    """
+    if not junctions:
+        return
+    state = _load_blame()
+    state['global_render_counter'] = state.get('global_render_counter', 0) + 1
+    cur_render = state['global_render_counter']
+    clips = state.setdefault('clips', {})
+    for j in junctions:
+        sev = float(j.get('severity', 0.0) or 0.0)
+        if sev <= severity_threshold:
+            continue
+        for cid_key in ('prev_clip_id', 'cur_clip_id'):
+            cid = j.get(cid_key)
+            if not cid:
+                continue
+            entry = clips.setdefault(cid, [])
+            # Append (render_idx, blame_amount). Decay computed at read.
+            entry.append([cur_render, 0.5])
+    try:
+        _save_blame(state)
+    except Exception as e:
+        print(f"[blame_history] save failed: {e}")
+
+
+def probe_blame_decay(clip_id: str, decay_renders: int = 5,
+                       strength: float = 0.4) -> float:
+    """Penalty contribution: decays linearly across `decay_renders`
+    future renders. Returns negative number (penalty) or 0 when clip
+    has no recent failures."""
+    state = _load_blame()
+    entry = state.get('clips', {}).get(clip_id, [])
+    if not entry:
+        return 0.0
+    cur_render = state.get('global_render_counter', 0)
+    total = 0.0
+    for render_idx, amount in entry:
+        age = cur_render - int(render_idx)
+        if age < 0 or age >= decay_renders:
+            continue
+        weight = 1.0 - (age / decay_renders)
+        total += float(amount) * weight
+    # Cap at 1.0 → max penalty = -strength
+    return float(-strength * min(1.0, total))
+
+
+# ---------------------------------------------------------------------------
+# #5 — Style-RAG wire helpers (already-scaffolded module → picker)
+# ---------------------------------------------------------------------------
+
+def style_rag_clip_prior(candidate_clap: np.ndarray,
+                          user_pool_centroid: np.ndarray,
+                          rag_top_k: int = 5,
+                          strength: float = 0.20) -> float:
+    """Bonus from style-RAG retrieval. For the user pool's CLAP centroid,
+    style_rag returns top-k pro-DJ-set transitions. Their clip neighborhoods
+    define a "this kind of mix uses these kinds of clips" prior.
+
+    Implementation: cosine sim of candidate against the union of pro-set
+    clip embeddings retrieved as similar to user centroid. Boost when
+    candidate is near a pro choice.
+    """
+    try:
+        from style_rag import StyleRAG
+    except Exception:
+        return 0.0
+    try:
+        rag = StyleRAG()
+        # rag returns examples — extract their CLAP / clip embeddings if available
+        examples = rag.retrieve(user_pool_centroid, k=rag_top_k)
+    except Exception:
+        return 0.0
+    if not examples:
+        return 0.0
+    # Each example may carry a 'clap' / 'embedding' field — collect available ones
+    pro_embs = []
+    for ex in examples:
+        if not isinstance(ex, dict):
+            continue
+        e = ex.get('clap') or ex.get('embedding') or ex.get('vec')
+        if e is not None:
+            arr = np.asarray(e, dtype=np.float32)
+            n = float(np.linalg.norm(arr))
+            if n > 0:
+                pro_embs.append(arr / n)
+    if not pro_embs:
+        return 0.0
+    cand = np.asarray(candidate_clap, dtype=np.float32)
+    n = float(np.linalg.norm(cand))
+    if n == 0:
+        return 0.0
+    cand = cand / n
+    sims = [float(cand @ p) for p in pro_embs]
+    # Best match cosine sim ∈ [-1, 1]; map to [-strength, +strength]
+    return float(strength * max(sims))
+
+
 __all__ = [
     'pool_vocal_mean',
     'vocal_diversity_bonus',
@@ -358,4 +599,11 @@ __all__ = [
     'enforce_genre_floor',
     'arc_conditioned_bpm_target',
     'arc_bpm_score',
+    # closed-loop
+    'record_audiobox_render',
+    'audiobox_lift_term',
+    'record_probe_failures',
+    'probe_blame_decay',
+    # style-RAG
+    'style_rag_clip_prior',
 ]
