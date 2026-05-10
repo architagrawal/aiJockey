@@ -77,44 +77,38 @@ Tier 1 — high-impact, low-friction (do after demo ships)
   - Pairs with H (candidate-scored picker) — picker scores against
     drop/buildup labels instead of pop verse/chorus.
   - Paper: EDMFormer (arXiv 2603.08759)
+  - **BLOCKED**: as of 2026-05, no public checkpoint or training code
+    found. Track upstream for release; if authors don't publish weights,
+    self-train on EDM-98 dataset (98 annotated tracks) becomes the path
+    — small dataset, finetune from MERT/MusicFM may suffice. Re-evaluate
+    Q3 2026.
 
-  J. COCOLA scorer — stem-compat gate before mashup/stem_swap (lands: tier1-upgrades)
-  Deep model predicting whether two isolated stems sound pleasant when
-  played simultaneously (e.g. vocals-of-A over instr-of-B). Cheap pre-flight
-  gate for Director's mashup_transition + stem_swap_transition picks —
-  reject incompatible pairs before render instead of catching dissonance
-  post-render in critic_v2 / probes.
-  - Wire: in planner.py mashup-pick branch. Score candidate stem pairs;
-    reject below threshold; cascade to crossfade.
-  - Source: AutoMashup paper (arXiv 2508.06516); COCOLA mentioned in
-    multi-agent remix survey.
+  J. COCOLA scorer — stem-compat gate for mashup/stem_swap (lands: tier1-upgrades, low priority)
+  Contrastive model estimating harmonic + rhythmic coherence between
+  two stems. Pre-flight gate for Director's mashup_transition +
+  stem_swap_transition picks — reject incompatible pairs before render
+  instead of catching dissonance post-render in critic_v2 / probes.
+  - Source: github.com/gladia-research-group/cocola (Apache, public
+    checkpoints trained on MUSDB18-HQ/MoisesDB/Slakh2100/CocoChorales)
+  - Paper: arXiv 2404.16969 (COCOLA: Coherence-Oriented Contrastive
+    Learning of Musical Audio Representations)
+  - Wire: src/cocola_score.py wrapper; in planner.py mashup-pick branch
+    score candidate stem pairs, reject below threshold, cascade to
+    crossfade.
+  - **Low priority**: mashup_transition + stem_swap aren't frequent
+    Director picks. Most transitions go crossfade/eq_swap/filter_fade
+    where COCOLA never fires. Land if/when stem-overlay transitions
+    become a more common pick (e.g. after H candidate-scored picker
+    surfaces more mashup opportunities from labeled vocal segments).
 
-  K. FAD critic head — distributional similarity vs dj_sets_mp3 (lands: best-output-pipeline)
-  Frechet Audio Distance between rendered mix embedding and dj_sets_mp3
-  reference corpus distribution. Reference corpus already snapshot-pinned
-  (~2.5 GB, 25 sets). Adds a third critic head alongside probes (rule-based)
-  + Audiobox Aesthetics (perceptual). FAD captures "does this sound like
-  a real DJ mix" — orthogonal signal.
-  - Wire: src/fad_score.py + X-FAD header in /generate. PANN/VGGish
-    embedding extractor, single Gaussian fit on reference corpus
-    (precompute, cache). Per-render: extract embed, compute FAD vs
-    cached reference Gaussian.
-  - Use: ship gate alongside severity + Audiobox. DPO reward candidate.
-  - Reference: AI Music Remixing System Design doc (Critic metric matrix).
-
-  L. MusRec timbre morphing in transition window (lands: tier1-upgrades, Tier 3)
-  Zero-shot rectified-flow text-to-music editor. Morphs timbre of
-  outgoing stem during the crossfade window (e.g. distorted-rock guitar
-  → synth-pad over 8 bars) so cross-genre transitions don't feel like
-  hard cuts. Operates only at transition boundary — non-destructive to
-  source identity.
-  - Use case: when Director picks a high-genre-distance handoff (rock →
-    deep-house), invoke MusRec on outgoing 'other' stem with prompt
-    derived from incoming clip's CLAP caption. Bounded to overlap region.
-  - Paper: MusRec (arXiv 2511.04376). Inversion + attention replacement
-    via RF-Solver.
-  - Cost: heavy (diffusion). Tier 3 — only after E (ACE-Step) latency
-    profile understood.
+  Considered + dropped from this pass:
+  - FAD critic vs dj_sets_mp3 corpus — 25-set reference corpus too small
+    for stable Gaussian fit (standard FAD uses 1000s); Audiobox
+    Aesthetics (Tier1-C) covers similar perceptual-quality role
+    reference-free. Revisit only if reference corpus 10x'd.
+  - MusRec timbre morphing — duplicative with E (ACE-Step) generative
+    role; rock→deep-house style use case not in current pool;
+    diffusion latency cost not justified at Tier-3 priority. Park.
 
   Cross-cutting techniques NOT yet evaluated (worth follow-up)
 
