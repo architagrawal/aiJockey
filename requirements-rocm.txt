@@ -18,6 +18,17 @@ lion-pytorch>=0.2.2
 # native, ROCm-compatible.  Set AIJOCKEY_BEAT_THIS=0 to fall back to librosa.
 beat_this @ git+https://github.com/CPJKU/beat_this.git
 
+# madmom — required for beat_this DBN postprocessor. Without madmom the
+# `minimal` peak-picker over-detects 2-3x BPM on real DJ material (verified
+# test1/test2: 333/231 BPM minimal vs 103/117 BPM real). CPJKU main
+# (0.17.dev0+) builds on Py3.10 — needs cython<3 + --no-build-isolation:
+#   pip install 'cython<3.0'
+#   pip install --no-build-isolation 'madmom @ git+https://github.com/CPJKU/madmom.git@main'
+# Pinning the editable install here so requirements-rocm.txt stays declarative;
+# users on a constrained build env can comment out + install manually.
+cython<3.0
+madmom @ git+https://github.com/CPJKU/madmom.git@main
+
 # BS-Roformer / Mel-Band Roformer for vocal stem separation. ~+2 dB SDR vs
 # htdemucs_ft on vocals. MIT. OPT-IN: install + set AIJOCKEY_BS_ROFORMER=1
 # AND AIJOCKEY_BS_ROFORMER_CKPT=/path/to/checkpoint.ckpt. Drums/bass/other
