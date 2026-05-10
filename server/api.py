@@ -102,7 +102,7 @@ def _min_clips() -> int:
 MIN_CLIPS, MAX_CLIPS = _min_clips(), 8
 MIN_DURATION = 30
 MAX_DURATION_HARD = 600
-MAX_FILE_BYTES = 25 * 1024 * 1024
+MAX_FILE_BYTES = int(os.environ.get("AIJOCKEY_MAX_FILE_MB", "75")) * 1024 * 1024
 LIBRARY_MAX_PICK = 12
 ALLOWED_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
 
