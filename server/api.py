@@ -775,6 +775,10 @@ def list_sample_clips():
                 dur = audio_duration_seconds(p)
             except Exception:
                 continue
+            # Skip unreadable / zero-duration files. Pre-flight saves user from
+            # picking a broken clip and getting 500 mid-render.
+            if sz < 1024 or dur < 5.0:
+                continue
             out.append({"id": p.name, "name": p.stem,
                         "size_mb": round(sz / 1024 / 1024, 1),
                         "duration_sec": round(dur, 1),
@@ -1434,8 +1438,38 @@ async def generate(
             for cid in ids:
                 p = _resolve_sample_clip(cid)
                 if p is None:
-                    raise HTTPException(400, detail=f"sample clip not found / unsafe: {cid}")
-                files_payload.append((cid, p.read_bytes()))
+                    raise HTTPException(400,
+                        detail=f"sample clip not found / unsafe: {cid}")
+                # Validate readability + duration before accepting. Unreadable
+                # files (corrupt VBR mp3, missing frames) → skip with 400.
+                try:
+                    dur = audio_duration_seconds(p)
+                except Exception:
+                    dur = 0.0
+                if dur < 5.0:
+                    raise HTTPException(400,
+                        detail=f"sample clip {cid!r} is unreadable or too short "
+                               f"(dur={dur:.1f}s). Pick another.")
+                # Transcode to clean 44.1k mp3 via ffmpeg if source might trip
+                # downstream Demucs/soundfile (curated_ia mp3s have ID3 quirks).
+                # Cheap: ~100-300ms per file. Falls through to raw bytes if
+                # ffmpeg unavailable.
+                clean_bytes = None
+                try:
+                    import subprocess as _sp
+                    out_path = Path(tempfile.mkstemp(suffix=".mp3")[1])
+                    _sp.run(
+                        ["ffmpeg", "-y", "-i", str(p),
+                         "-codec:a", "libmp3lame", "-q:a", "4",
+                         "-ar", "44100", "-ac", "2",
+                         "-loglevel", "error", str(out_path)],
+                        check=True, capture_output=True, timeout=30)
+                    clean_bytes = out_path.read_bytes()
+                    out_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                files_payload.append(
+                    (cid, clean_bytes if clean_bytes else p.read_bytes()))
         if not (1 <= len(files_payload) <= MAX_CLIPS):
             raise HTTPException(400,
                                  detail=f"need 1-{MAX_CLIPS} clips total "
