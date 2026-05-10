@@ -151,6 +151,30 @@ def check_accent_budget(timeline: list[dict],
     return out
 
 
+def check_user_clip_floor(timeline: list[dict],
+                           clips_meta: dict[str, dict]) -> list[Violation]:
+    """Every user-source clip must appear in at least one timeline segment.
+    User paid the upload tax; their clip belongs in the mix.
+    """
+    if not clips_meta:
+        return []
+    user_ids = {cid for cid, m in clips_meta.items()
+                if (m.get('source') or '').lower() == 'user'}
+    if not user_ids:
+        return []
+    used = {e.get('clip_id') for e in timeline}
+    missing = sorted(user_ids - used)
+    if not missing:
+        return []
+    return [Violation(
+        rule='user_clip_floor',
+        junction_index=-1,
+        detail=f'user clips not in timeline: {missing[:5]}'
+                + ('...' if len(missing) > 5 else ''),
+        severity='warn',  # warn rather than reject; planner should re-pick
+    )]
+
+
 def validate(timeline: list[dict],
              clips_meta: dict[str, dict] | None = None) -> list[Violation]:
     """Run all rules. Returns ordered list of violations."""
@@ -162,6 +186,7 @@ def validate(timeline: list[dict],
     out += check_bpm_drift(timeline)
     out += check_key_compat_for_long_blends(timeline)
     out += check_accent_budget(timeline)
+    out += check_user_clip_floor(timeline, clips_meta)
     return out
 
 

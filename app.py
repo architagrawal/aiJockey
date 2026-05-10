@@ -109,6 +109,7 @@ def run_pipeline(files, duration_min, use_classifier, ckpt_path,
         coherence_hint=coherence,
         max_transitions_hint=tier_n,
         approx_duration_seconds=secs,
+        audio_clip_paths=[os.path.join(CLIP_DIR, f) for f in staged],
     )
     cfg_kwargs = dict(
         target_duration=secs,

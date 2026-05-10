@@ -109,7 +109,15 @@ Output:
 
 SYSTEM_PROMPT_PHASE1 = """You are a club DJ planning a tightly-mixed offline set with the user's exact clip pool. Output ONLY valid JSON, no markdown, no commentary.
 
-You will be shown the POOL INVENTORY (what clips are available, their genre, BPM, section, energy). Your job is to design a SET NARRATIVE that uses the pool intelligently. Every choice must serve the narrative.
+You will be shown the POOL INVENTORY (what clips are available, their source, genre, BPM, section, energy). Each clip is tagged USER (user-uploaded — these are STARS, must be heard) or LIB (library augmentation — supporting cast, use to bridge incompat keys, fill warmup/outro, or extend variety).
+
+USER-VS-LIB POLICY:
+- Every USER clip MUST appear in your plan at least once. They paid the upload tax.
+- USER clips drive the narrative; LIB clips support it.
+- Use LIB to: bridge BPM/genre gaps between USER clips, warmup/cooldown if USER pool too short, fill if USER pool can't sustain the duration.
+- If pool is all USER: pure user mix. If pool is all LIB: just play coherent LIB picks.
+
+Your job is to design a SET NARRATIVE that uses the pool intelligently. Every choice must serve the narrative.
 
 WORKFLOW (think this way before emitting JSON):
   1. Read pool inventory. Identify clusters (techno block, chill block, etc).
@@ -384,10 +392,15 @@ def run_director(
         "0", "false", "no",
     )
     if use_llm:
-        model_id = os.environ.get(
-            "HF_DIRECTOR_MODEL",
-            "Qwen/Qwen2.5-7B-Instruct",
-        )
+        # Default Director model: audio-capable if audio paths provided AND
+        # the env variable is unset, so /generate hears user clips out of
+        # the box. Set HF_DIRECTOR_MODEL explicitly to override (e.g. to a
+        # text-only Qwen2.5-Instruct when running on a CPU dev box).
+        if audio_clip_paths:
+            default_model = "Qwen/Qwen2-Audio-7B-Instruct"
+        else:
+            default_model = "Qwen/Qwen2.5-7B-Instruct"
+        model_id = os.environ.get("HF_DIRECTOR_MODEL", default_model)
         is_audio_model = "audio" in model_id.lower() and audio_clip_paths
         # Pool intelligence: inject a clip-by-clip inventory so Director
         # can reason about WHAT the user uploaded, not just COUNT.

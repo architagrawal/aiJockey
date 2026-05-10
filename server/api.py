@@ -191,6 +191,7 @@ def probe_mp3_bitrate_kbps(path: Path) -> int | None:
 
 
 def library_clip_paths(limit: int = LIBRARY_MAX_PICK) -> list[Path]:
+    """All available library clips on disk (alphabetical fallback)."""
     if not LIBRARY_CLIPS_DIR.exists() or not LIBRARY_CACHE_DIR.exists():
         return []
     out = []
@@ -204,6 +205,105 @@ def library_clip_paths(limit: int = LIBRARY_MAX_PICK) -> list[Path]:
         if len(out) >= limit:
             break
     return out
+
+
+def lib_count_for_mode(mode: str, user_clip_count: int,
+                       user_clip_total_sec: float, target_duration: float
+                       ) -> int:
+    """Compute how many library clips to add given semantic mode.
+
+    Sweet spot moves with (user_count, user_total_dur, target_duration):
+      - short user pool + long target = need many lib clips
+      - long user clips already cover target = need 0 lib clips
+    Mode caps the upper bound:
+      - tight        = 0 (user clips only)
+      - balanced     = enough to fill 30% headroom
+      - exploratory  = up to LIBRARY_MAX_PICK
+    """
+    if mode == "tight":
+        return 0
+    needed_sec = max(target_duration * 1.3, 60.0)  # 30% headroom
+    deficit = max(0.0, needed_sec - user_clip_total_sec)
+    raw = int(deficit / 60.0 + 0.5)  # ~1 clip/min
+    if mode == "balanced":
+        return max(0, min(LIBRARY_MAX_PICK // 2, raw))
+    # exploratory
+    return max(0, min(LIBRARY_MAX_PICK, raw + user_clip_count // 2))
+
+
+def _user_pool_centroid(saved_paths: list[Path], cache_dir: Path
+                        ) -> "np.ndarray | None":
+    """Mean of CLAP embeddings across user clips. None if cache absent."""
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    arrs: list = []
+    for sp in saved_paths:
+        npz_path = cache_dir / f"{sp.stem}.npz"
+        if not npz_path.exists():
+            continue
+        try:
+            with np.load(npz_path) as d:
+                if "clap" in d:
+                    a = np.asarray(d["clap"], dtype=np.float32).reshape(-1)
+                    if a.size:
+                        arrs.append(a)
+        except Exception:
+            continue
+    if not arrs:
+        return None
+    import numpy as np
+    return np.mean(np.stack(arrs), axis=0)
+
+
+def library_clip_paths_clap(centroid, count: int,
+                              user_bpm_mean: float | None = None,
+                              bpm_tol_pct: float = 15.0
+                              ) -> list[Path]:
+    """Pick top-`count` library clips by CLAP cosine sim to centroid,
+    filtered by BPM band if user_bpm_mean given.
+
+    Falls back to alphabetical first-N if centroid is None or no library
+    cache exists.
+    """
+    if count <= 0:
+        return []
+    if centroid is None:
+        return library_clip_paths(limit=count)
+    try:
+        import numpy as np
+    except ImportError:
+        return library_clip_paths(limit=count)
+    if not LIBRARY_CACHE_DIR.exists():
+        return []
+    candidates: list[tuple[float, Path]] = []
+    cnorm = float(np.linalg.norm(centroid)) + 1e-9
+    for p in sorted(LIBRARY_CLIPS_DIR.iterdir()):
+        if p.suffix.lower() not in ALLOWED_EXTS:
+            continue
+        npz = LIBRARY_CACHE_DIR / f"{p.stem}.npz"
+        meta = LIBRARY_CACHE_DIR / f"{p.stem}.json"
+        if not npz.exists() or not meta.exists():
+            continue
+        try:
+            with np.load(npz) as d:
+                a = np.asarray(d["clap"], dtype=np.float32).reshape(-1) \
+                    if "clap" in d else None
+            if a is None or a.size == 0:
+                continue
+            sim = float((a @ centroid) / (np.linalg.norm(a) * cnorm + 1e-9))
+            if user_bpm_mean is not None:
+                import json as _json
+                m = _json.loads(meta.read_text())
+                bpm = float(m.get("tempo", 0.0))
+                if bpm > 0 and abs(bpm - user_bpm_mean) / user_bpm_mean > bpm_tol_pct / 100.0:
+                    continue
+            candidates.append((sim, p))
+        except Exception:
+            continue
+    candidates.sort(key=lambda x: -x[0])
+    return [p for _, p in candidates[:count]]
 
 
 def link_or_copy(src: Path, dst: Path) -> None:
@@ -303,6 +403,8 @@ def _run_generate_sync(
     seed: int | None,
     lufs: float,
     export_format: str,
+    mix_mode: str = "balanced",
+    library_role: str | None = None,
 ) -> tuple[Path, Path | None]:
     """Returns (artifact_path, optional timeline_path)."""
     t0 = time.perf_counter()
@@ -377,6 +479,18 @@ def _run_generate_sync(
     analyze_pool(str(pool_dir), str(cache_dir), device=AI_DEVICE, force=False, workers=min(4, len(saved_paths)))
     jlog(job_id, "analyze", (time.perf_counter() - t_an) * 1000, disk_gb=disk_free_gb())
 
+    # Tag user clips with source='user' in their cache JSON. (Library
+    # clips inherit source='library' on link from cache_dir below.)
+    for sp in saved_paths:
+        cj = cache_dir / f"{sp.stem}.json"
+        if cj.exists():
+            try:
+                cm = json.loads(cj.read_text())
+                cm['source'] = 'user'
+                cj.write_text(json.dumps(cm, indent=2, default=str))
+            except Exception:
+                pass
+
     # Phase A polish §1.3: BPM band check post-analyze. User-uploaded clips
     # outside [BPM_MIN, BPM_MAX] are flagged as warnings (Phase 1 is tuned
     # for 4-on-floor 100-135). We don't hard-reject so users get a graceful
@@ -401,14 +515,59 @@ def _run_generate_sync(
                 ingest_warnings.append(msg)
                 jlog(job_id, "bpm_band_warn", clip=sp.name, bpm=bpm)
 
+    # Library augmentation: pick CLAP-similar library clips when use_library
+    # and lib_count_for_mode > 0. Otherwise alphabetical fallback / no library.
+    library_picked: list[Path] = []
     if use_library:
-        for lib_clip in library_clip_paths():
+        # Compute user pool stats
+        user_total_sec = sum(audio_duration_seconds(p) for p in saved_paths)
+        user_bpms: list[float] = []
+        for sp in saved_paths:
+            cj = cache_dir / f"{sp.stem}.json"
+            if cj.exists():
+                try:
+                    cm = json.loads(cj.read_text())
+                    if cm.get("tempo"):
+                        user_bpms.append(float(cm["tempo"]))
+                except Exception:
+                    pass
+        user_bpm_mean = (sum(user_bpms) / len(user_bpms)) if user_bpms else None
+        n_lib = lib_count_for_mode(mix_mode, len(saved_paths),
+                                    user_total_sec, float(duration))
+        if n_lib > 0:
+            centroid = _user_pool_centroid(saved_paths, cache_dir)
+            library_picked = library_clip_paths_clap(
+                centroid, n_lib, user_bpm_mean=user_bpm_mean)
+            if not library_picked:
+                # Centroid-based pick failed (no embeddings yet). Alphabetical.
+                library_picked = library_clip_paths(limit=n_lib)
+        jlog(job_id, "library_pick",
+             mode=mix_mode, role=library_role,
+             user_clips=len(saved_paths), user_bpm_mean=user_bpm_mean,
+             user_total_sec=round(user_total_sec, 1),
+             lib_count=len(library_picked))
+        for lib_clip in library_picked:
             link_or_copy(lib_clip, pool_dir / lib_clip.name)
             stem = lib_clip.stem
             for extn in ("json", "npz"):
                 src = LIBRARY_CACHE_DIR / f"{stem}.{extn}"
                 if src.exists():
                     link_or_copy(src, cache_dir / f"{stem}.{extn}")
+            # Stamp source='library' on the linked cache JSON. We rewrite
+            # the in-cache copy, leaving LIBRARY_CACHE_DIR untouched.
+            cj = cache_dir / f"{stem}.json"
+            if cj.exists():
+                try:
+                    # If symlink, replace with concrete file before edit
+                    if cj.is_symlink():
+                        real = cj.resolve()
+                        cj.unlink()
+                        shutil.copy2(real, cj)
+                    cm = json.loads(cj.read_text())
+                    cm['source'] = 'library'
+                    cj.write_text(json.dumps(cm, indent=2, default=str))
+                except Exception:
+                    pass
             stems_src = LIBRARY_CACHE_DIR / "stems" / stem
             stems_dst = cache_dir / "stems" / stem
             if stems_src.exists() and not stems_dst.exists():
@@ -425,6 +584,12 @@ def _run_generate_sync(
     base_prompt = prompt if prompt else cfg_preset["prompt"]
     base_arc = arc if arc else cfg_preset["arc"]
 
+    # Multimodal Director: pass user audio paths so an audio-capable model
+    # (e.g. Qwen2-Audio when HF_DIRECTOR_MODEL contains 'audio') hears the
+    # actual clips before planning. _call_qwen2audio caps at 6 clips
+    # internally to bound input length. Library paths intentionally not
+    # passed — they don't carry user intent.
+    audio_paths_for_director = [str(p) for p in saved_paths]
     director = run_director(
         user_prompt=base_prompt,
         arc_preset=base_arc,
@@ -433,6 +598,7 @@ def _run_generate_sync(
         max_transitions_hint=estimate_max_transitions_for_pool(len(clips), float(duration)),
         approx_duration_seconds=float(duration),
         clips_meta=clips,
+        audio_clip_paths=audio_paths_for_director,
     )
     final_prompt = director.get("text_prompt") or base_prompt
     final_arc = director.get("arc") or base_arc
@@ -505,6 +671,10 @@ def _run_generate_sync(
     return art, timeline_path
 
 
+VALID_MIX_MODES = ("tight", "balanced", "exploratory")
+VALID_LIBRARY_ROLES = ("any", "fill_gaps", "warmup_outro", "bridges_only")
+
+
 @app.post("/generate")
 async def generate(
     background: BackgroundTasks,
@@ -512,6 +682,8 @@ async def generate(
     duration: int = Form(180),
     files: list[UploadFile] = File(...),
     use_library: bool = Form(False),
+    mix_mode: str = Form("balanced"),
+    library_role: str | None = Form(None),
     prompt: str | None = Form(None),
     arc: str | None = Form(None),
     seed: int | None = Form(None),
@@ -536,6 +708,17 @@ async def generate(
             400,
             detail=f"invalid arc {arc!r}; allowed in current phase: {valid_arcs}",
         )
+    mode = (mix_mode or "balanced").lower().strip()
+    if mode not in VALID_MIX_MODES:
+        raise HTTPException(400, detail=f"invalid mix_mode {mix_mode!r}; "
+                                         f"valid: {VALID_MIX_MODES}")
+    role = (library_role or "").lower().strip() or None
+    if role is not None and role not in VALID_LIBRARY_ROLES:
+        raise HTTPException(400, detail=f"invalid library_role {library_role!r}; "
+                                         f"valid: {VALID_LIBRARY_ROLES}")
+    # tight mode forces use_library off regardless of toggle.
+    if mode == "tight":
+        use_library = False
 
     # Phase 1: min 3 clips. If user gave fewer, require library augmentation.
     min_clips = _min_clips()
@@ -592,6 +775,8 @@ async def generate(
                     seed=seed,
                     lufs=lufs,
                     export_format=ef,
+                    mix_mode=mode,
+                    library_role=role,
                 )
             finally:
                 if _prev is None:
@@ -619,14 +804,41 @@ async def generate(
         mt = media_types.get(ef, "application/octet-stream")
         fname = f"aijockey_{job_id}{Path(artifact).suffix}"
 
-        headers = {"X-Job-Id": job_id}
+        headers = {"X-Job-Id": job_id, "X-Mix-Mode": mode}
         try:
             tl_p = RESULTS_DIR / job_id / "timeline.json"
             if tl_p.exists():
                 with open(tl_p) as tf:
-                    tw = json.load(tf).get("meta", {}).get("ingest_warnings") or []
+                    tl_blob = json.load(tf)
+                tw = tl_blob.get("meta", {}).get("ingest_warnings") or []
                 if tw:
                     headers["X-Ingest-Warnings"] = "; ".join(tw)[:1900]
+                # Per-clip source breakdown for transparency.
+                tl = tl_blob.get("timeline", [])
+                cache_p = RESULTS_DIR / job_id / "cache"
+                user_ids: set[str] = set()
+                lib_ids: set[str] = set()
+                for entry in tl:
+                    cid = entry.get("clip_id")
+                    if not cid:
+                        continue
+                    cj = cache_p / f"{cid}.json"
+                    if cj.exists():
+                        try:
+                            cm = json.loads(cj.read_text())
+                            src = (cm.get("source") or "").lower()
+                            if src == "user":
+                                user_ids.add(cid)
+                            elif src == "library":
+                                lib_ids.add(cid)
+                        except Exception:
+                            pass
+                clips_used = {
+                    "user_count": len(user_ids),
+                    "library_count": len(lib_ids),
+                    "library_ids": sorted(lib_ids)[:20],
+                }
+                headers["X-Clips-Used"] = json.dumps(clips_used)[:1900]
         except Exception:
             pass
 

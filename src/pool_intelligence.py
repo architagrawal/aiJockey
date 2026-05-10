@@ -98,7 +98,11 @@ def _energy_mean(meta: dict) -> float:
 # ---------------------------------------------------------------------------
 
 def tag_clip(meta: dict) -> dict:
-    """Return {clip_id, genre, bpm, bpm_band, key, section_top, energy, duration, has_vocals}."""
+    """Return {clip_id, source, genre, bpm, bpm_band, key, section_top, energy, duration, has_vocals}.
+
+    `source` reads from meta['source'] (= 'user' | 'library'); defaults
+    to 'unknown' so legacy cache JSONs without the field still tag.
+    """
     cid = meta.get('clip_id') or ''
     name_genre = _genre_from_string(cid)
     bpm = float(meta.get('tempo', 0.0)) or 0.0
@@ -113,6 +117,7 @@ def tag_clip(meta: dict) -> dict:
 
     return {
         'clip_id':      cid,
+        'source':       (meta.get('source') or 'unknown').lower(),
         'genre':        name_genre,
         'bpm':          round(bpm, 1),
         'bpm_band':     bpm_band(bpm),
@@ -264,17 +269,18 @@ def summary_table(clips: dict[str, dict], max_rows: int = 16) -> str:
     rows = [tag_clip(cm) for cm in clips.values()]
     rows.sort(key=lambda r: (r['bpm_band'], r['genre'], -r['energy']))
 
-    lines = ['Pool inventory (what you have to mix with):']
-    lines.append('| # | genre | bpm | section | energy | vox | dur |')
-    lines.append('|---|---|---|---|---|---|---|')
+    lines = ['Pool inventory (what you have to mix with). USER = user-uploaded; LIB = library augmentation:']
+    lines.append('| # | source | genre | bpm | section | energy | vox | dur |')
+    lines.append('|---|---|---|---|---|---|---|---|')
     for i, r in enumerate(rows[:max_rows]):
         vox = 'V' if r['has_vocals'] else '-'
+        src = (r.get('source') or 'unknown').upper()[:4]
         lines.append(
-            f"| {i} | {r['genre']:10s} | {r['bpm']:5.1f} | "
+            f"| {i} | {src:6s} | {r['genre']:10s} | {r['bpm']:5.1f} | "
             f"{r['section_top']:10s} | {r['energy']:.2f} | {vox} | {r['duration']:.0f}s |"
         )
     if len(rows) > max_rows:
-        lines.append(f'| ... | (+{len(rows)-max_rows} more) | | | | | |')
+        lines.append(f'| ... | (+{len(rows)-max_rows} more) | | | | | | |')
 
     clusters = cluster_pool(clips)
     coh = coherence_score(clips)
