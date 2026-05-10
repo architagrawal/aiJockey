@@ -672,30 +672,61 @@ def ready():
     return {"status": "ready", "disk_free_gb": disk_free_gb()}
 
 
-SAMPLE_CLIPS_DIR = ROOT / "user_set"
+# Multiple sample-clip pools. Each entry: (directory, origin_tag).
+# `origin` flows to the API response so UI can label/disclaim accordingly.
+# Path-traversal guards in /generate must allow any of these dirs.
+SAMPLE_CLIPS_DIRS: list[tuple[Path, str]] = [
+    (ROOT / "user_set", "user_set"),
+    (ROOT / "test_user_clips", "test_clips"),
+]
+SAMPLE_CLIPS_DIR = SAMPLE_CLIPS_DIRS[0][0]  # legacy alias
+
+
+def _resolve_sample_clip(cid: str) -> Path | None:
+    """Locate a sample clip by id across all SAMPLE_CLIPS_DIRS, with traversal
+    guard. Returns Path or None if not found / unsafe."""
+    for d, _origin in SAMPLE_CLIPS_DIRS:
+        if not d.exists():
+            continue
+        p = d / cid
+        try:
+            resolved = p.resolve()
+            if not str(resolved).startswith(str(d.resolve())):
+                continue
+        except Exception:
+            continue
+        if p.exists():
+            return p
+    return None
 
 
 @app.get("/sample_clips")
 def list_sample_clips():
-    """Return pre-staged user clips on the droplet (skip-upload speedup)."""
-    if not SAMPLE_CLIPS_DIR.exists():
-        return {"clips": []}
+    """Return pre-staged user clips on the droplet (skip-upload speedup).
+
+    Each clip carries an `origin` tag so UI can apply provenance labels
+    (e.g. test_clips = research-only / copyrighted).
+    """
     out = []
-    for p in sorted(SAMPLE_CLIPS_DIR.iterdir()):
-        if p.suffix.lower() not in ALLOWED_EXTS:
+    for d, origin in SAMPLE_CLIPS_DIRS:
+        if not d.exists():
             continue
-        try:
-            sz = p.stat().st_size
-            dur = audio_duration_seconds(p)
-        except Exception:
-            continue
-        out.append({
-            "id": p.name,
-            "name": p.stem,
-            "size_mb": round(sz / 1024 / 1024, 1),
-            "duration_sec": round(dur, 1),
-        })
-    return {"clips": out, "dir": str(SAMPLE_CLIPS_DIR)}
+        for p in sorted(d.iterdir()):
+            if p.suffix.lower() not in ALLOWED_EXTS:
+                continue
+            try:
+                sz = p.stat().st_size
+                dur = audio_duration_seconds(p)
+            except Exception:
+                continue
+            out.append({
+                "id": p.name,
+                "name": p.stem,
+                "size_mb": round(sz / 1024 / 1024, 1),
+                "duration_sec": round(dur, 1),
+                "origin": origin,
+            })
+    return {"clips": out, "dirs": [str(d) for d, _ in SAMPLE_CLIPS_DIRS]}
 
 
 @app.get("/preset_schema")
@@ -1307,18 +1338,9 @@ async def generate(
         if sample_clip_ids and sample_clip_ids.strip():
             ids = [s.strip() for s in sample_clip_ids.split(",") if s.strip()]
             for cid in ids:
-                p = SAMPLE_CLIPS_DIR / cid
-                # Defend path traversal: must resolve under SAMPLE_CLIPS_DIR.
-                try:
-                    resolved = p.resolve()
-                    if not str(resolved).startswith(str(SAMPLE_CLIPS_DIR.resolve())):
-                        raise HTTPException(400, detail=f"sample_clip_id {cid!r} invalid")
-                except HTTPException:
-                    raise
-                except Exception:
-                    raise HTTPException(400, detail=f"sample_clip_id {cid!r} invalid")
-                if not p.exists():
-                    raise HTTPException(400, detail=f"sample clip not found: {cid}")
+                p = _resolve_sample_clip(cid)
+                if p is None:
+                    raise HTTPException(400, detail=f"sample clip not found / unsafe: {cid}")
                 files_payload.append((cid, p.read_bytes()))
         if not (1 <= len(files_payload) <= MAX_CLIPS):
             raise HTTPException(400,

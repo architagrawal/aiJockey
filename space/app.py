@@ -226,11 +226,21 @@ def render_segments_dataframe(timeline_json):
     return rows
 
 
-def fetch_sample_clips() -> list[tuple[str, str]]:
-    """Return [(label, id)] of pre-staged user clips on the droplet.
+def _shorten_sample_name(stem: str) -> str:
+    """Strip YouTube IDs / verbose suffixes for cleaner UI labels."""
+    import re
+    s = stem
+    s = re.sub(r"__[A-Za-z0-9_-]{8,}$", "", s)
+    s = re.sub(r"_Official_Music_Video.*$", "", s, flags=re.IGNORECASE)
+    s = s.replace("_", " ").strip()
+    return s[:60]
 
-    Used to populate the 'pick from sample set' checkbox group so users
-    can render without uploading 50MB-each WAV files.
+
+def fetch_sample_clips() -> list[tuple[str, str]]:
+    """Return [(label, id)] of pre-staged clips on droplet.
+
+    Test-clips origin gets a [research only] suffix so users / judges
+    can distinguish copyrighted reference material from cleared user_set.
     """
     if not (MI300X_URL and MI300X_KEY):
         return []
@@ -240,8 +250,13 @@ def fetch_sample_clips() -> list[tuple[str, str]]:
         if not r.ok:
             return []
         clips = r.json().get("clips", [])
-        return [(f"{c['name']} ({c['duration_sec']:.0f}s, "
-                 f"{c['size_mb']:.1f} MB)", c["id"]) for c in clips]
+        out = []
+        for c in clips:
+            tag = " [research only]" if c.get("origin") == "test_clips" else ""
+            label = (f"{_shorten_sample_name(c['name'])} "
+                     f"({c['duration_sec']:.0f}s, {c['size_mb']:.1f} MB){tag}")
+            out.append((label, c["id"]))
+        return out
     except Exception:
         return []
 
@@ -481,6 +496,17 @@ with gr.Blocks(title="AiJockey", theme=THEME, css=CSS) as app:
                     gr.Markdown(f"_pending render: `{slug}.mp3`_")
 
     with gr.Tab("Try It"):
+        gr.Markdown(
+            "> **Disclaimer.** AiJockey is a research demo, provided as-is. "
+            "The AI is experimental and the hackathon team accepts no "
+            "warranty or liability for its output. Pre-staged sample clips "
+            "marked _[research only]_ are copyrighted material from their "
+            "original artists; they are included strictly for academic "
+            "evaluation under fair-use principles. Do **not** redistribute "
+            "or commercially use any rendered mix that includes those "
+            "clips. By uploading audio you confirm you hold the necessary "
+            "rights. AGPL-3.0; forks must remain open-source."
+        )
         with gr.Row():
             login_btn = gr.LoginButton(value="Sign in with Hugging Face",
                                         size="sm")
