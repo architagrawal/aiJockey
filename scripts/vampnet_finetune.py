@@ -148,7 +148,17 @@ def main():
             inp = stacked.masked_fill(mask, mask_token)
 
             optim.zero_grad()
-            logits = coarse(inp)   # expected (B, n_cb, T, vocab)
+            # VampNet's coarse expects long token ids and embeds them
+            # internally. Ensure input dtype is long so embedding layer
+            # is hit before any conv-on-floats path.
+            inp = inp.long()
+            try:
+                logits = coarse(inp)
+            except RuntimeError as _re:
+                # Some VampNet branches expect (z, r=time_step). Retry
+                # with explicit time arg of zeros (no-noise inference).
+                r_dummy = torch.zeros(inp.shape[0], device=inp.device)
+                logits = coarse(inp, r_dummy)
             if logits.dim() == 3:
                 logits = logits.unsqueeze(1)
             loss = F.cross_entropy(

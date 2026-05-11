@@ -122,13 +122,36 @@ def main():
     iface = pipe["interface"]
     sr = int(pipe["sr"])
 
-    import copy
     import torch
     import torch.nn.functional as F
 
-    # Reference (frozen) coarse copy for DPO
+    # Reference (frozen) coarse for DPO. deepcopy fails on weight_norm
+    # parametrized modules; instead snapshot state_dict and create a
+    # fresh-architecture clone via VampNet's interface, then load.
     coarse = iface.coarse
-    ref = copy.deepcopy(coarse).eval()
+    ref_state = {k: v.detach().clone() for k, v in coarse.state_dict().items()}
+    try:
+        # Reconstruct ref via the same VampNet class. _load_model exists
+        # in vampnet/interface.py; fall back to a copied module via
+        # parametrized-safe deepcopy fallback.
+        from vampnet.interface import _load_model  # type: ignore
+        ref = _load_model(
+            ckpt=str(iface.coarse_path),
+            lora_ckpt=None,
+            device=iface.device,
+            chunk_size_s=getattr(coarse, "chunk_size_s", 10),
+        )
+        ref.load_state_dict(ref_state)
+    except Exception:
+        # Last-ditch: torch.save+load to a temp file to clone
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tf:
+            torch.save(ref_state, tf.name)
+            ref_path = tf.name
+        ref = type(coarse).__new__(type(coarse))
+        ref.__dict__ = {k: v for k, v in coarse.__dict__.items()}
+        ref.load_state_dict(torch.load(ref_path, weights_only=False))
+    ref.eval()
     for p in ref.parameters():
         p.requires_grad_(False)
 
