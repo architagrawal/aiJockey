@@ -54,16 +54,26 @@ def _load(device: str | None = None):
             if device is None:
                 device = "cuda" if torch.cuda.is_available() else "cpu"
             ckpt_dir = os.environ.get("AIJOCKEY_VAMPNET_CKPT_DIR")
-            iface_kwargs = {"device": device}
             if ckpt_dir:
-                # Local checkpoint directory layout: codec.pth / coarse.pth
-                # / c2f.pth — match VampNet's Interface signature.
-                iface_kwargs.update({
-                    "codec_ckpt": str(Path(ckpt_dir) / "codec.pth"),
-                    "coarse_ckpt": str(Path(ckpt_dir) / "coarse.pth"),
-                    "coarse2fine_ckpt": str(Path(ckpt_dir) / "c2f.pth"),
-                })
-            iface = Interface(**iface_kwargs)
+                iface = Interface(
+                    codec_ckpt=str(Path(ckpt_dir) / "codec.pth"),
+                    coarse_ckpt=str(Path(ckpt_dir) / "coarse.pth"),
+                    coarse2fine_ckpt=str(Path(ckpt_dir) / "c2f.pth"),
+                    device=device,
+                    compile=False,
+                )
+            else:
+                # Default path: download from hugggof/vampnet HF repo.
+                # `Interface.default()` handles codec + coarse + c2f download.
+                iface = Interface.default()
+                iface.device = device
+                try:
+                    iface.codec.to(device)
+                    iface.coarse.to(device)
+                    if iface.c2f is not None:
+                        iface.c2f.to(device)
+                except Exception:
+                    pass
             _PIPE = {"interface": iface, "device": device,
                       "sr": getattr(iface, "codec", None) and
                             getattr(iface.codec, "sample_rate", 44100) or 44100}
