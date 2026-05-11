@@ -148,25 +148,32 @@ def main():
             inp = stacked.masked_fill(mask, mask_token)
 
             optim.zero_grad()
-            # VampNet.forward() expects LATENTS (float), not token ids.
-            # Token-id-to-latent conversion: coarse.embedding.from_codes(z, codec).
-            # This is the key fix — passing long tokens directly hits
-            # CodebookEmbedding.out_proj (Conv1d) with wrong dtype.
+            # VampNet.forward(latents) — feed embedding-from_codes output.
+            # Output shape (B, vocab, T * n_predict_codebooks).
             inp = inp.long()
             with torch.no_grad():
-                # Truncate inp to coarse's n_codebooks (4 in vampnet).
                 n_cb = coarse.n_codebooks
+                n_pred = coarse.n_predict_codebooks
                 inp_cb = inp[:, :n_cb, :]
                 latents = coarse.embedding.from_codes(inp_cb, iface.codec)
             logits = coarse(latents)
-            if logits.dim() == 3:
-                logits = logits.unsqueeze(1)
-            # Match logits target shape to coarse's n_predict_codebooks
-            target_cb = target[:, :coarse.n_predict_codebooks if hasattr(
-                coarse, "n_predict_codebooks") else n_cb, :].long()
+            # logits: (B, vocab, T * n_pred) — interleaved per timestep
+            # target tokens for prediction codebooks: (B, n_pred, T)
+            tgt_cb = target[:, :n_pred, :].long()
+            B, V, TC = logits.shape
+            T_actual = TC // n_pred
+            # Trim target to T_actual if logits T < target T
+            tgt_T = min(tgt_cb.shape[-1], T_actual)
+            tgt_cb = tgt_cb[:, :, :tgt_T]
+            logits = logits[:, :, : tgt_T * n_pred]
+            # Flatten: target (B, n_pred, T) → (B*T*n_pred,)
+            # Logits transposed to match: (B, vocab, T*n_pred) → (B*T*n_pred, vocab)
+            # Need same interleave: VampNet rearranged "b (p c) t -> b p (t c)"
+            # so (t c) groups time-fastest then codebook. Reshape target to match:
+            tgt_flat = tgt_cb.permute(0, 2, 1).reshape(-1)
+            logits_flat = logits.permute(0, 2, 1).reshape(-1, V)
             loss = F.cross_entropy(
-                logits.permute(0, 3, 1, 2),
-                target_cb,
+                logits_flat, tgt_flat,
                 ignore_index=-100,
                 reduction="mean",
             )
