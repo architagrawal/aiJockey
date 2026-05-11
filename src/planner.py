@@ -149,7 +149,16 @@ def transition_score(prev_clip: dict, prev_seg: dict, prev_target_bpm: float,
     stretch = abs(prev_target_bpm - cand_bpm) / max(cand_bpm, 1.0)
     tempo_score = max(0.0, 1.0 - stretch / 0.12)
 
-    key_dist = camelot_distance(prev_target_key, cand_clip.get('key', '?'))
+    # Harmonic distance: TPS router falls back to Camelot when no
+    # non-Western genre tag present. Toggle AIJOCKEY_TPS_ROUTER=0 to
+    # force Camelot.
+    try:
+        from tps_router import harmonic_distance as _hd
+        key_dist = _hd(prev_target_key, cand_clip.get('key', '?'),
+                        genre_a=(prev_clip.get('genre') if isinstance(prev_clip, dict) else None),
+                        genre_b=cand_clip.get('genre'))
+    except Exception:
+        key_dist = camelot_distance(prev_target_key, cand_clip.get('key', '?'))
     key_score = max(0.0, 1.0 - key_dist / 4.0)
 
     out_e = float(prev_seg.get('energy', 0.5))

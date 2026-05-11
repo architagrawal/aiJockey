@@ -123,6 +123,19 @@ def adaptive_lufs_target(default_lufs: float, genre: str | None,
 
 def master(in_path: str, out_path: str, target_lufs: float = -9.0,
             genre: str | None = None) -> None:
+    # Matchering reference-master alt path. When enabled + reference set,
+    # we bypass the rule-based multi-band chain entirely.
+    import os as _menv
+    if _menv.environ.get("AIJOCKEY_MATCHERING_ENABLE", "0") == "1":
+        try:
+            from matchering_master import master_with_reference
+            res = master_with_reference(in_path, out_path,
+                                          target_lufs=target_lufs)
+            if res:
+                print(f"mastered via Matchering -> {out_path}")
+                return
+        except Exception as _e:
+            print(f"[master] matchering path failed, falling back: {_e}")
     wav, sr = torchaudio.load(in_path)
     x = wav.numpy().astype(np.float32)
     if x.shape[0] == 1:

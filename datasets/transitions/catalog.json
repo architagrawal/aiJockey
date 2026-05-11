@@ -997,6 +997,31 @@
         "seed": "int"
       },
       "vocal_safe": true
+    },
+    {
+      "name": "spectral_hold",
+      "category": "spectral",
+      "tier": "major",
+      "implementation_status": "implemented",
+      "typical_bars": [
+        1,
+        4
+      ],
+      "best_for": [
+        "outro",
+        "breakdown",
+        "bridge"
+      ],
+      "incompatible_with": [
+        "chorus",
+        "drop"
+      ],
+      "description": "Freeze last STFT frame of outgoing into a tonal pad (magnitude held, phase randomized) and crossfade pad into incoming. Glues genre/timbre jumps where direct crossfade jars. Uses src/spectral_hold.py.",
+      "params": {
+        "hold_seconds": "float",
+        "xfade_seconds": "float"
+      },
+      "vocal_safe": true
     }
   ],
   "tier_summary": {
