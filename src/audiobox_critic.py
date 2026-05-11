@@ -194,6 +194,48 @@ def score(audio_path: str | Path,
         return None
 
 
+def score_batch(audio_paths: list[str],
+                 device: str = "cuda") -> list[dict[str, float] | None]:
+    """Score a list of audio files in one forward call. Falls back to per-path
+    score() when the standalone predictor is unavailable.
+
+    Order-preserving: returns one dict (or None) per input path.
+    """
+    if not audio_paths:
+        return []
+    if not enabled():
+        return [None] * len(audio_paths)
+    pipe = _load(device=device)
+    if pipe is None:
+        return [None] * len(audio_paths)
+    paths = [str(p) for p in audio_paths]
+    if pipe["kind"] == "standalone":
+        try:
+            results = pipe["predictor"].forward(
+                [{"path": p} for p in paths]
+            )
+        except Exception as e:
+            print(f"[audiobox_aesthetics] batch forward failed: {e}; "
+                  f"falling back to per-path")
+            return [score(p, device=device) for p in paths]
+        out: list[dict[str, float] | None] = []
+        for r in results or []:
+            if not r:
+                out.append(None)
+                continue
+            out.append({
+                "PQ": float(r.get("PQ", r.get("production_quality", 0.0)) or 0.0),
+                "PC": float(r.get("PC", r.get("production_complexity", 0.0)) or 0.0),
+                "CE": float(r.get("CE", r.get("content_enjoyment", 0.0)) or 0.0),
+                "CU": float(r.get("CU", r.get("content_usefulness", 0.0)) or 0.0),
+            })
+        while len(out) < len(paths):
+            out.append(None)
+        return out
+    # HF fallback path has no batch surface; serialize.
+    return [score(p, device=device) for p in paths]
+
+
 def severity_proxy(scores: dict[str, float] | None,
                    pq_target: float = 6.0,
                    ce_target: float = 6.0) -> float | None:

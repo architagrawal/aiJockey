@@ -77,6 +77,8 @@ class PlannerConfig:
                                               # + multi-genre BPM/key filter
     pool_coherence: float | None = None       # mean pairwise CLAP similarity in pool
     same_genre_tight_mix: bool = False        # Director: tighten key/tempo vs variety
+    cache_dir: str | None = None              # path to /cache; enables sidecar lookups
+                                              # like audiobox_slice_term during scoring
 
 
 @dataclass
@@ -767,6 +769,29 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
                 slope_diff = abs(target_slope - section_slope)
                 slope_match = max(0.0, 1.0 - slope_diff)
                 score += 0.10 * slope_match
+                # Closed-loop: lift clips with historical Audiobox PQ/CE.
+                # Toggle: AIJOCKEY_AUDIOBOX_RERANK=0 to disable.
+                import os as _os
+                if _os.environ.get('AIJOCKEY_AUDIOBOX_RERANK', '1') == '1':
+                    try:
+                        from library_picker_score import audiobox_lift_term
+                        score += audiobox_lift_term(cid)
+                    except Exception:
+                        pass
+                # Per-section Audiobox PQ from cache prescore. Adds bonus
+                # when this specific segment scored above baseline at cache
+                # build. Toggle: AIJOCKEY_AUDIOBOX_SLICE_TERM=0.
+                if (config.cache_dir
+                        and _os.environ.get('AIJOCKEY_AUDIOBOX_SLICE_TERM', '1') == '1'):
+                    try:
+                        from library_picker_score import audiobox_slice_term
+                        score += audiobox_slice_term(
+                            config.cache_dir, cid,
+                            float(seg.get('start', 0.0)),
+                            float(seg.get('end', 0.0)),
+                        )
+                    except Exception:
+                        pass
                 if is_surprise and st.surprises_used >= config.surprise_budget:
                     continue
                 scored_candidates.append((score, tech, is_surprise, cid, seg, seg_idx))

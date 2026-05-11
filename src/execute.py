@@ -400,8 +400,18 @@ def render_segment(entry: dict, clips_meta: dict[str, dict],
     # logic / future re-injection paths can reference them.
     import os
     inst_only = os.environ.get('AIJOCKEY_INSTRUMENTAL_ONLY', '0') == '1'
+    # vocal_dim mode: keep vocals but attenuate by N dB. Negative = quieter.
+    # Honored only when inst_only is off. -6 dB → 0.5 gain.
+    try:
+        vocal_dim_db = float(os.environ.get('AIJOCKEY_VOCAL_DIM_DB', '0') or 0)
+    except Exception:
+        vocal_dim_db = 0.0
     if inst_only:
         full = sum(s for n, s in processed.items() if n != 'vocals').astype(np.float32)
+    elif vocal_dim_db < 0 and 'vocals' in processed:
+        gain = float(10.0 ** (vocal_dim_db / 20.0))
+        full = sum(s * (gain if n == 'vocals' else 1.0)
+                   for n, s in processed.items()).astype(np.float32)
     else:
         full = sum(processed.values()).astype(np.float32)
     return full, processed

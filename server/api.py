@@ -1279,6 +1279,7 @@ def _run_generate_sync(
         pool_coherence=coherence,
         same_genre_tight_mix=bool(director.get("same_genre_tight_mix")),
         compat_head_ckpt=str(compat_head_path) if compat_head_path.exists() else None,
+        cache_dir=str(cache_dir),
     )
 
     t_pl = time.perf_counter()
@@ -1714,6 +1715,16 @@ async def generate(
                                     jlog(job_id, "audiobox", aae_ms,
                                          pq=aae["PQ"], pc=aae["PC"],
                                          ce=aae["CE"], cu=aae["CU"], sev=sev)
+                                    # Closed-loop: record per-clip credit for
+                                    # picker rerank in future renders.
+                                    try:
+                                        from library_picker_score import (
+                                            record_audiobox_render as _rec_aae,
+                                        )
+                                        _rec_aae(list(user_ids) + list(lib_ids), aae)
+                                    except Exception as _re:
+                                        jlog(job_id, "aae_rec_skip", 0,
+                                             err=str(_re)[:200])
                         except Exception as _e:
                             jlog(job_id, "audiobox_skip", 0, err=str(_e)[:200])
 

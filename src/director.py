@@ -492,6 +492,34 @@ def _sanitize_out(raw: dict[str, Any], arc_fallback: str, user_prompt: str,
     }
 
 
+def _score_plan(plan: dict, arc_fb: str) -> float:
+    """Pre-render heuristic to compare candidate Director plans.
+
+    Without rendering each (expensive), score on structural signals the
+    planner+execute layers already exploit: tier variety, drop presence,
+    callback budget, arc-preset compliance, surprise budget. Higher is
+    better. Cheap, deterministic.
+    """
+    tiers = plan.get('transition_tiers') or []
+    n = len(tiers) or 1
+    uniq = len(set(tiers))
+    has_major = any(t == 'major' for t in tiers)
+    has_drop = any(t == 'drop' for t in tiers)
+    pct_minor = sum(1 for t in tiers if t == 'minor') / n
+    arc_match = 1.0 if plan.get('arc') == arc_fb else 0.0
+    cb = int(plan.get('callback_budget') or 0)
+    sb = int(plan.get('surprise_budget') or 0)
+    return (
+        1.5 * (uniq / 4.0)            # 4 tier classes max in phase 1
+        + 1.0 * float(has_major)
+        + 0.7 * float(has_drop)
+        + 0.6 * max(0.0, 1.0 - pct_minor)
+        + 0.5 * arc_match
+        + 0.4 * min(1.0, cb / 3.0)
+        + 0.3 * min(1.0, sb / 6.0)
+    )
+
+
 def run_director(
     user_prompt: str,
     arc_preset: str | None,
@@ -567,14 +595,46 @@ def run_director(
             + pool_block
             + (rag_block if rag_block else "")
         )
+        # Multi-Director sampling: draw N plans at temperature>0, score with
+        # _score_plan, return best. N=1 keeps legacy greedy-decode behavior.
         try:
-            if is_audio_model:
-                out_text = _call_qwen2audio(llm_prompt, audio_clip_paths, model_id)
-            else:
-                out_text = _call_hf_instruct(llm_prompt, model_id)
-            parsed = _extract_json_object(out_text or "")
-            if parsed:
-                return _sanitize_out(parsed, arc_fb, user_prompt, mt, coherence_hint)
+            n_samples = max(1, int(os.environ.get('AIJOCKEY_DIRECTOR_N_SAMPLES', '1')))
+        except Exception:
+            n_samples = 1
+        try:
+            temperature = float(os.environ.get('AIJOCKEY_DIRECTOR_TEMPERATURE', '0.7'))
+        except Exception:
+            temperature = 0.7
+        try:
+            best_plan = None
+            best_score = float('-inf')
+            for s_i in range(n_samples):
+                do_sample = n_samples > 1 or temperature > 0 and s_i > 0
+                if is_audio_model:
+                    # Qwen2-Audio path: keep greedy on first draw, sample on extras.
+                    out_text = _call_qwen2audio(llm_prompt, audio_clip_paths, model_id)
+                else:
+                    out_text = _call_hf_instruct(
+                        llm_prompt, model_id,
+                        do_sample=(n_samples > 1),
+                        temperature=temperature,
+                    )
+                parsed = _extract_json_object(out_text or "")
+                if not parsed:
+                    continue
+                cand_plan = _sanitize_out(parsed, arc_fb, user_prompt, mt, coherence_hint)
+                sc = _score_plan(cand_plan, arc_fb)
+                if sc > best_score:
+                    best_score = sc
+                    best_plan = cand_plan
+                if n_samples > 1:
+                    print(f"[director] sample {s_i+1}/{n_samples} score={sc:.2f}")
+            if best_plan is not None:
+                if n_samples > 1:
+                    best_plan = dict(best_plan)
+                    best_plan['_sampling_score'] = round(best_score, 3)
+                    best_plan['_n_samples'] = n_samples
+                return best_plan
         except Exception as e:
             print(f"[director] LLM failed ({e}), fallback")
 
@@ -663,7 +723,10 @@ def _call_qwen2audio(user_message: str, audio_paths: list[str],
 _LLM_CACHE: tuple[Any, Any, str] | None = None
 
 
-def _call_hf_instruct(user_message: str, model_id: str) -> str:
+def _call_hf_instruct(user_message: str, model_id: str,
+                       *, do_sample: bool = False,
+                       temperature: float = 0.7,
+                       top_p: float = 0.9) -> str:
     global _LLM_CACHE
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -709,8 +772,9 @@ def _call_hf_instruct(user_message: str, model_id: str) -> str:
         gen = model.generate(
             **inputs,
             max_new_tokens=512,
-            do_sample=False,
-            temperature=1.0,           # ignored when do_sample=False; explicit for clarity
+            do_sample=do_sample,
+            temperature=temperature if do_sample else 1.0,
+            top_p=top_p if do_sample else 1.0,
             repetition_penalty=1.05,
             pad_token_id=tok.pad_token_id or tok.eos_token_id,
         )

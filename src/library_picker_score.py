@@ -447,6 +447,94 @@ def audiobox_lift_term(clip_id: str, axes: tuple[str, ...] = ('PQ', 'CE'),
 
 
 # ---------------------------------------------------------------------------
+# #1d — Audiobox slice term (per-section PQ from cache build)
+# ---------------------------------------------------------------------------
+# Reads cache/<clip_id>.audiobox_slices.json (built once by
+# scripts/audiobox_slice_prescore.py). Returns a per-section bonus the
+# planner adds to the candidate score. Cold-start = 0 when no sidecar.
+
+_SLICE_CACHE: dict[str, list[dict]] = {}
+
+
+def _slice_candidate_paths(cache_dir: 'str | Path', clip_id: str) -> list[Path]:
+    """Per-job cache first, then global library cache fallback."""
+    fname = f'{clip_id}.audiobox_slices.json'
+    paths = [Path(cache_dir) / fname]
+    lib_cache = os.environ.get('AIJOCKEY_LIBRARY_CACHE') or '/cache'
+    lib = Path(lib_cache) / fname
+    if lib not in paths:
+        paths.append(lib)
+    return paths
+
+
+def _load_slice_sidecar(cache_dir: 'str | Path', clip_id: str) -> list[dict]:
+    key = f'{cache_dir}::{clip_id}'
+    if key in _SLICE_CACHE:
+        return _SLICE_CACHE[key]
+    data: list[dict] = []
+    for p in _slice_candidate_paths(cache_dir, clip_id):
+        if not p.exists():
+            continue
+        try:
+            blob = json.loads(p.read_text())
+            data = blob.get('sections') or []
+            if data:
+                break
+        except Exception:
+            continue
+    _SLICE_CACHE[key] = data
+    return data
+
+
+def audiobox_slice_term(cache_dir: 'str | Path', clip_id: str,
+                         section_start: float, section_end: float,
+                         baseline: float = 6.0,
+                         strength: float = 0.4,
+                         axes: tuple[str, ...] = ('PQ', 'CE')) -> float:
+    """Score bonus from this section's pre-computed Audiobox PQ/CE.
+
+    Matches section by start/end (tolerance 0.5s). Returns 0 when no
+    sidecar or no match — cold-start neutral. Above baseline → bonus,
+    below baseline → penalty (symmetric, clamped to ±strength).
+    """
+    sections = _load_slice_sidecar(cache_dir, clip_id)
+    if not sections:
+        return 0.0
+    best = None
+    for s in sections:
+        try:
+            ds = abs(float(s.get('start', 0.0)) - float(section_start))
+            de = abs(float(s.get('end', 0.0)) - float(section_end))
+        except Exception:
+            continue
+        if ds < 0.6 and de < 0.6:
+            best = s
+            break
+    if best is None:
+        # Fallback: enclosing window
+        for s in sections:
+            try:
+                ss = float(s.get('start', 0.0))
+                se = float(s.get('end', 0.0))
+            except Exception:
+                continue
+            if ss <= section_start + 0.5 and se + 0.5 >= section_end:
+                best = s
+                break
+    if best is None:
+        return 0.0
+    vals: list[float] = []
+    for ax in axes:
+        v = best.get(ax)
+        if isinstance(v, (int, float)):
+            vals.append(float(v))
+    if not vals:
+        return 0.0
+    avg = sum(vals) / len(vals)
+    return float(strength * max(-1.0, min(1.0, (avg - baseline) / 2.0)))
+
+
+# ---------------------------------------------------------------------------
 # #4 — Probe-failure exclusion / blame decay
 # ---------------------------------------------------------------------------
 # When a junction's probe severity > threshold, BOTH clips at that junction
