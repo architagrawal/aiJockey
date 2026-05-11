@@ -999,6 +999,104 @@
       "vocal_safe": true
     },
     {
+      "name": "acapella_overlay",
+      "category": "stem_overlay",
+      "tier": "major",
+      "implementation_status": "implemented",
+      "typical_bars": [
+        8,
+        16
+      ],
+      "best_for": [
+        "verse",
+        "bridge",
+        "breakdown"
+      ],
+      "incompatible_with": [
+        "drop"
+      ],
+      "description": "Drop outgoing vocal stem over incoming instrumental drums+bass+other for 8-16 bars. Mashup feel. Requires outgoing has vocal stem. Uses src/acapella_overlay.py.",
+      "params": {
+        "bars": "int",
+        "vocal_db": "float",
+        "inst_db": "float"
+      },
+      "vocal_safe": true
+    },
+    {
+      "name": "vocal_stab_cut",
+      "category": "cut",
+      "tier": "cut",
+      "implementation_status": "planned",
+      "typical_bars": [
+        1,
+        2
+      ],
+      "best_for": [
+        "verse",
+        "chorus"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro"
+      ],
+      "description": "Outgoing cuts mid-phrase, isolated vocal stab marks the seam, incoming on next downbeat. Hip-hop / mashup signature.",
+      "params": {
+        "stab_clip_id": "string",
+        "bars": "int"
+      },
+      "vocal_safe": false
+    },
+    {
+      "name": "stutter_loop",
+      "category": "loop",
+      "tier": "loop",
+      "implementation_status": "implemented",
+      "typical_bars": [
+        4,
+        8
+      ],
+      "best_for": [
+        "outro",
+        "verse",
+        "bridge"
+      ],
+      "incompatible_with": [
+        "drop",
+        "intro"
+      ],
+      "description": "Lock outgoing's last 8 bars on repeat, ride filter, incoming on phrase end. Stalls for phrase alignment. Implemented via beat_juggle.py at low subdivision.",
+      "params": {
+        "loop_bars": "int",
+        "filter_freq_start_hz": "float"
+      },
+      "vocal_safe": true
+    },
+    {
+      "name": "reverse_reverb_impact",
+      "category": "fx",
+      "tier": "drop",
+      "implementation_status": "implemented",
+      "typical_bars": [
+        1,
+        2
+      ],
+      "best_for": [
+        "drop",
+        "chorus",
+        "build_up"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro"
+      ],
+      "description": "Reverse-decayed reverb tail synthesized from outgoing material; swells INTO incoming downbeat. Pre-drop suction effect. Uses src/reverse_reverb.py.",
+      "params": {
+        "decay_s": "float"
+      },
+      "vocal_safe": true
+    },
+    {
       "name": "echo_throw",
       "category": "fx",
       "tier": "major",

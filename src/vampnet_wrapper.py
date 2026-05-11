@@ -164,8 +164,34 @@ def generate_bridge(a_tail_path: str | Path,
         sig_in = AudioSignal(full_in[None, :], sample_rate=sr)
         sig_in = sig_in.to(pipe["device"])
 
-        # Encode to codec tokens
-        z = iface.encode(sig_in)   # (1, n_codebooks, T_tokens)
+        # Encode to codec tokens (with optional disk cache).
+        # AIJOCKEY_VAMPNET_TOKEN_CACHE=/scratch/vamp_tokens enables.
+        import hashlib as _hl
+        cache_dir = os.environ.get("AIJOCKEY_VAMPNET_TOKEN_CACHE")
+        cache_p = None
+        if cache_dir:
+            key = _hl.md5(
+                f"{a_tail_path}|{b_head_path}|{gap_seconds}|"
+                f"{context_seconds}|{sr}".encode()
+            ).hexdigest()[:16]
+            cache_p = Path(cache_dir) / f"vamp_tok_{key}.pt"
+            cache_p.parent.mkdir(parents=True, exist_ok=True)
+            if cache_p.exists():
+                try:
+                    z = torch.load(cache_p, map_location=pipe["device"])
+                except Exception:
+                    z = None
+            else:
+                z = None
+        else:
+            z = None
+        if z is None:
+            z = iface.encode(sig_in)
+            if cache_p is not None:
+                try:
+                    torch.save(z.detach().cpu(), cache_p)
+                except Exception:
+                    pass
 
         # Build mask: 0 means keep, 1 means inpaint
         n_tokens = z.shape[-1]

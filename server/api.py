@@ -1828,6 +1828,34 @@ async def generate(
                                     (time.perf_counter() - t_wall), 2),
                                 probe=probe,
                             )
+                            # Persist full plan + audiobox for KTO/DPO
+                            # training. AIJOCKEY_PERSIST_PLAN_STATS=1.
+                            try:
+                                if os.environ.get(
+                                        "AIJOCKEY_PERSIST_PLAN_STATS", "1") == "1":
+                                    stats_path = (Path("/scratch/probes")
+                                                   / "plan_stats.jsonl")
+                                    stats_path.parent.mkdir(parents=True,
+                                                              exist_ok=True)
+                                    row = {
+                                        "ts": time.time(),
+                                        "job_id": job_id,
+                                        "prompt": tl_blob.get("meta", {})
+                                                          .get("prompt"),
+                                        "director_plan": director_blob,
+                                        "audiobox": aae if "aae" in dir() else None,
+                                        "user_ids": sorted(user_ids),
+                                        "lib_ids": sorted(lib_ids)[:32],
+                                        "output_path": str(artifact)
+                                            if "artifact" in dir() else None,
+                                        "pool_fingerprint": (
+                                            f"{len(user_ids)}u_{len(lib_ids)}l"),
+                                    }
+                                    with open(stats_path, "a") as _f:
+                                        _f.write(json.dumps(row) + "\n")
+                            except Exception as _pe:
+                                jlog(job_id, "plan_stats_skip", 0,
+                                     err=str(_pe)[:200])
                         except Exception as _e:
                             jlog(job_id, "probe_log_skip", 0, err=str(_e)[:200])
                 except Exception as e:

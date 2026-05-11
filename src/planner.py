@@ -810,6 +810,38 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
                         score += mert_lift_term(config.cache_dir, cid)
                     except Exception:
                         pass
+                # Strict outro->intro preference. When prev ends in `outro`
+                # and cand opens with `intro`, +0.5 score bonus.
+                # AIJOCKEY_OUTRO_INTRO_PREF=1.
+                if _os.environ.get('AIJOCKEY_OUTRO_INTRO_PREF', '1') == '1':
+                    try:
+                        prev_seg_type = (last.segment.get('type') or '').lower()
+                        cand_seg_type = (seg.get('type') or '').lower()
+                        if prev_seg_type == 'outro' and cand_seg_type == 'intro':
+                            score += 0.5
+                        elif prev_seg_type in ('breakdown', 'bridge') and \
+                                cand_seg_type == 'intro':
+                            score += 0.3
+                    except Exception:
+                        pass
+                # Cross-track artist dedup: penalize when candidate clip_id
+                # shares the post-genre__ prefix (likely same artist) with
+                # any clip used in last 60s of timeline.
+                # AIJOCKEY_ARTIST_DEDUP=1.
+                if _os.environ.get('AIJOCKEY_ARTIST_DEDUP', '1') == '1':
+                    try:
+                        # Extract artist token: after first `__`, before `_-_`
+                        def _artist(cid: str) -> str:
+                            parts = cid.split('__', 1)
+                            tail = parts[1] if len(parts) > 1 else cid
+                            return tail.split('_-_')[0].lower()[:24]
+                        cand_a = _artist(cid)
+                        if cand_a and any(
+                                _artist(rid) == cand_a
+                                for rid in st.recent_clip_ids[-3:]):
+                            score -= 0.4
+                    except Exception:
+                        pass
                 if is_surprise and st.surprises_used >= config.surprise_budget:
                     continue
                 scored_candidates.append((score, tech, is_surprise, cid, seg, seg_idx))

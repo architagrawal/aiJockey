@@ -65,7 +65,21 @@ def limit(x: np.ndarray, ceiling_db: float = -1.0, lookahead_ms: float = 5.0,
           sr: int = 44100) -> np.ndarray:
     ceiling = 10.0 ** (ceiling_db / 20.0)
     lookahead = max(1, int(lookahead_ms * sr / 1000.0))
-    abs_x = np.abs(x).max(axis=0)
+    # ISP-aware: detect inter-sample peaks via 4x upsample of abs envelope.
+    # AIJOCKEY_LIMITER_ISP=1 enables. Drops ISP overshoot by ~1 dB.
+    import os as _los
+    isp = _los.environ.get("AIJOCKEY_LIMITER_ISP", "0") == "1"
+    if isp:
+        try:
+            from scipy import signal as _ss
+            mono_abs = np.abs(x).max(axis=0)
+            up = _ss.resample_poly(mono_abs, 4, 1)
+            abs_x = np.maximum(mono_abs,
+                                 _ss.resample_poly(up, 1, 4)[: len(mono_abs)])
+        except Exception:
+            abs_x = np.abs(x).max(axis=0)
+    else:
+        abs_x = np.abs(x).max(axis=0)
     pad = np.concatenate([abs_x, np.zeros(lookahead)])
     rolling = np.array([pad[i:i + lookahead].max() for i in range(len(abs_x))])
     target = np.where(rolling > ceiling, ceiling / (rolling + 1e-10), 1.0)
@@ -201,9 +215,32 @@ def master(in_path: str, out_path: str, target_lufs: float = -9.0,
         pass
     x = limit(x, ceiling_db=-1.0, sr=sr).astype(np.float32)
 
+    # Bass-mono <120Hz collapse — club-safe phase. AIJOCKEY_BASS_MONO=1.
+    try:
+        from bass_mono import enabled as _bm_en, collapse as _bm_collapse
+        if _bm_en():
+            x = _bm_collapse(x, sr=sr)
+    except Exception:
+        pass
+    # Multiband M/S widener — replaces flat ms_widener if BOTH active.
+    try:
+        from ms_multiband_widener import enabled as _mb_en, widen as _mb_widen
+        if _mb_en():
+            x = _mb_widen(x, sr=sr)
+    except Exception:
+        pass
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     torchaudio.save(out_path, torch.from_numpy(x), sr)
     print(f"mastered -> {out_path}")
+    # Multi-target mastering — writes -14/-16/-23 LUFS siblings.
+    try:
+        from master_targets import enabled as _mt_en, write_targets as _mt_w
+        if _mt_en():
+            sib = _mt_w(out_path)
+            if sib:
+                print(f"[master_targets] wrote {list(sib.keys())}")
+    except Exception:
+        pass
 
 
 if __name__ == '__main__':

@@ -474,7 +474,18 @@ def cmd_all(args: argparse.Namespace) -> None:
             filter_timeline as _spv_filter,
         )
         if _spv_en():
+            dd_intent = bool((director_out or {}).get("double_drop"))
             _spv_filter(tl)
+    except Exception:
+        pass
+    # Double-drop coordinator: align drop->drop pairs to same downbeat.
+    # AIJOCKEY_DOUBLE_DROP=1 OR director_out.double_drop=True.
+    try:
+        from double_drop import maybe_engage as _dd_engage
+        dd_intent = bool((director_out or {}).get("double_drop"))
+        n_dd = _dd_engage(tl, director_double_drop=dd_intent)
+        if n_dd:
+            print(f"[planner] double-drop engaged at {n_dd} junctions")
     except Exception:
         pass
 

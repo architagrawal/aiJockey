@@ -492,6 +492,23 @@ def _sanitize_out(raw: dict[str, Any], arc_fallback: str, user_prompt: str,
     }
 
 
+def _score_plan_with_clap(plan: dict, arc_fb: str,
+                             cache_dir: str | None = None) -> float:
+    """Heuristic score + cross-clip CLAP coherence bonus when enabled."""
+    base = _score_plan(plan, arc_fb)
+    try:
+        from clap_coherence import enabled as _cc_en, coherence_score
+        if _cc_en() and cache_dir:
+            cids = plan.get("clip_sequence") or []
+            if cids:
+                sim = coherence_score(cids, cache_dir)
+                # sim in [-1, 1] → bonus up to ±0.6
+                base += 0.6 * float(sim)
+    except Exception:
+        pass
+    return base
+
+
 def _score_plan(plan: dict, arc_fb: str) -> float:
     """Pre-render heuristic to compare candidate Director plans.
 
@@ -611,6 +628,16 @@ def run_director(
             collected_plans: list[dict] = []
             for s_i in range(n_samples):
                 do_sample = n_samples > 1 or temperature > 0 and s_i > 0
+                # Confidence-aware early-exit: if best plan so far scores
+                # well above HIGH_CONF_THRESH, stop sampling. Saves GPU.
+                _conf_thr = float(os.environ.get(
+                    "AIJOCKEY_DIRECTOR_HIGH_CONF_THRESH", "4.0"))
+                if (best_plan is not None and best_score >= _conf_thr
+                        and s_i >= 1 and os.environ.get(
+                            "AIJOCKEY_DIRECTOR_CONF_EARLY_EXIT", "1") == "1"):
+                    print(f"[director] early-exit at sample {s_i} "
+                          f"(score={best_score:.2f} >= {_conf_thr})")
+                    break
                 if is_audio_model:
                     # Qwen2-Audio path: keep greedy on first draw, sample on extras.
                     out_text = _call_qwen2audio(llm_prompt, audio_clip_paths, model_id)
