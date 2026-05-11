@@ -148,22 +148,25 @@ def main():
             inp = stacked.masked_fill(mask, mask_token)
 
             optim.zero_grad()
-            # VampNet's coarse expects long token ids and embeds them
-            # internally. Ensure input dtype is long so embedding layer
-            # is hit before any conv-on-floats path.
+            # VampNet.forward() expects LATENTS (float), not token ids.
+            # Token-id-to-latent conversion: coarse.embedding.from_codes(z, codec).
+            # This is the key fix — passing long tokens directly hits
+            # CodebookEmbedding.out_proj (Conv1d) with wrong dtype.
             inp = inp.long()
-            try:
-                logits = coarse(inp)
-            except RuntimeError as _re:
-                # Some VampNet branches expect (z, r=time_step). Retry
-                # with explicit time arg of zeros (no-noise inference).
-                r_dummy = torch.zeros(inp.shape[0], device=inp.device)
-                logits = coarse(inp, r_dummy)
+            with torch.no_grad():
+                # Truncate inp to coarse's n_codebooks (4 in vampnet).
+                n_cb = coarse.n_codebooks
+                inp_cb = inp[:, :n_cb, :]
+                latents = coarse.embedding.from_codes(inp_cb, iface.codec)
+            logits = coarse(latents)
             if logits.dim() == 3:
                 logits = logits.unsqueeze(1)
+            # Match logits target shape to coarse's n_predict_codebooks
+            target_cb = target[:, :coarse.n_predict_codebooks if hasattr(
+                coarse, "n_predict_codebooks") else n_cb, :].long()
             loss = F.cross_entropy(
                 logits.permute(0, 3, 1, 2),
-                target.long(),
+                target_cb,
                 ignore_index=-100,
                 reduction="mean",
             )
