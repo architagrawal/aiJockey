@@ -180,14 +180,15 @@ def generate_bridge(a_tail_path: str | Path,
             keep_anchor = rng < (1.0 - mask_top_amount)
             mask = mask & (~keep_anchor.bool()).long()
 
-        # Run coarse + c2f vamp
+        # Run coarse + c2f vamp.  Do NOT pass return_signal — coarse_vamp
+        # forwards kwargs to coarse.generate which sets it internally.
+        c_codes = iface.coarse_vamp(
+            z, mask=mask,
+            temperature=float(temperature),
+            top_p=float(top_p),
+        )
         z_out = iface.coarse_to_fine(
-            iface.coarse_vamp(
-                z, mask=mask,
-                temperature=float(temperature),
-                top_p=float(top_p),
-                return_signal=False,
-            ),
+            c_codes,
             temperature=float(temperature),
         )
         sig_out = iface.decode(z_out)

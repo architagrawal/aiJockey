@@ -64,8 +64,7 @@ def _generate_candidate(iface, a_path: Path, b_path: Path, gap_s: float,
     mask = torch.zeros_like(z, dtype=torch.long)
     mask[..., a_tok : a_tok + g_tok] = 1
     z_out = iface.coarse_to_fine(
-        iface.coarse_vamp(z, mask=mask, temperature=temperature, top_p=top_p,
-                            return_signal=False),
+        iface.coarse_vamp(z, mask=mask, temperature=temperature, top_p=top_p),
         temperature=temperature,
     )
     sig_out = iface.decode(z_out)
