@@ -210,24 +210,40 @@ def main():
         sys.exit("no preference pairs above min-delta")
 
     def _logp(model, z, mask):
-        """Sum of log-probs of the masked positions under model."""
+        """Sum of log-probs of the masked positions under model.
+
+        VampNet.forward expects latents not tokens (per finetune fix):
+            latents = embedding.from_codes(z, codec)
+        Output shape: (B, vocab, T*n_pred) interleaved time-fastest.
+        """
         z = z.to(iface.device)
         mask = mask.to(iface.device)
-        # Coarse model expects masked input + predicts at masked positions.
-        inp = z.clone()
-        mask_token = int(getattr(coarse, "mask_token", 1024))
-        inp = inp.masked_fill(mask.bool(), mask_token)
-        logits = model(inp)
-        if logits.dim() == 3:
-            logits = logits.unsqueeze(1)
-        # Gather at original token id at masked positions
-        target = z
+        n_cb = model.n_codebooks
+        n_pred = model.n_predict_codebooks
+        z_cb = z[:, :n_cb, :]
+        mask_cb = mask[:, :n_cb, :]
+        # Mask token ids before latent conversion
+        mask_token = int(getattr(model, "mask_token", 1024))
+        z_masked = z_cb.long().clone()
+        z_masked[mask_cb.bool()] = mask_token
+        with torch.no_grad():
+            latents = model.embedding.from_codes(z_masked, iface.codec)
+        logits = model(latents)   # (B, V, T*n_pred)
+        B, V, TC = logits.shape
+        T_actual = TC // n_pred
+        # Target codebooks
+        tgt = z[:, :n_pred, :T_actual].long()
+        mask_pred = mask[:, :n_pred, :T_actual].float()
+        # logits permute → (B, T*n_pred, V); reshape to (B, T, n_pred, V)
+        logits = logits.permute(0, 2, 1).reshape(B, T_actual, n_pred, V)
         logp = F.log_softmax(logits, dim=-1)
-        # logp: (B, n_cb, T, V) ; target: (B, n_cb, T)
+        # target: (B, n_pred, T) → (B, T, n_pred)
+        tgt_t = tgt.permute(0, 2, 1)
         gathered = torch.gather(logp, dim=-1,
-                                 index=target.unsqueeze(-1).long()).squeeze(-1)
-        gathered = gathered * mask.float()
-        return gathered.sum()
+                                 index=tgt_t.unsqueeze(-1)).squeeze(-1)
+        # mask_pred: (B, n_pred, T) → (B, T, n_pred)
+        mask_t = mask_pred.permute(0, 2, 1)
+        return (gathered * mask_t).sum()
 
     for ep in range(args.epochs):
         ep_loss = 0.0
