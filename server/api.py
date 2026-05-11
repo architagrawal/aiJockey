@@ -1728,6 +1728,44 @@ async def generate(
                         except Exception as _e:
                             jlog(job_id, "audiobox_skip", 0, err=str(_e)[:200])
 
+                        # MuQ-Eval critic (additive). Music-specific quality
+                        # scalar. Off by default — flip AIJOCKEY_MUQ_EVAL_ENABLE=1.
+                        try:
+                            from muq_eval_critic import (
+                                enabled as _muq_en,
+                                score as _muq_score,
+                            )
+                            if _muq_en():
+                                t0 = time.perf_counter()
+                                ms_val = _muq_score(wav_for_probe)
+                                dt = int((time.perf_counter() - t0) * 1000)
+                                if ms_val is not None:
+                                    headers["X-MuQ-Eval"] = json.dumps(
+                                        {"score": round(float(ms_val), 3),
+                                         "ms": dt})[:200]
+                                    jlog(job_id, "muq_eval", dt, score=ms_val)
+                        except Exception as _e:
+                            jlog(job_id, "muq_eval_skip", 0, err=str(_e)[:200])
+
+                        # AudioMOS DORA-MOS critic (additive). MOS-style.
+                        # Off by default — flip AIJOCKEY_AUDIO_MOS_ENABLE=1.
+                        try:
+                            from audio_mos_critic import (
+                                enabled as _amos_en,
+                                score as _amos_score,
+                            )
+                            if _amos_en():
+                                t0 = time.perf_counter()
+                                mos_val = _amos_score(wav_for_probe)
+                                dt = int((time.perf_counter() - t0) * 1000)
+                                if mos_val is not None:
+                                    headers["X-AudioMOS"] = json.dumps(
+                                        {"mos": round(float(mos_val), 3),
+                                         "ms": dt})[:200]
+                                    jlog(job_id, "audio_mos", dt, mos=mos_val)
+                        except Exception as _e:
+                            jlog(job_id, "audio_mos_skip", 0, err=str(_e)[:200])
+
                         # Per-render probe log → DPO data accumulator.
                         # Atomic JSONL append at $AIJOCKEY_PROBE_LOG (default
                         # /scratch/probes/log.jsonl). Captures Director plan,
