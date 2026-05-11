@@ -63,17 +63,32 @@ def _load(device: str | None = None):
                     compile=False,
                 )
             else:
-                # Default path: download from hugggof/vampnet HF repo.
-                # `Interface.default()` handles codec + coarse + c2f download.
-                iface = Interface.default()
-                iface.device = device
+                # Default path: trigger HF download of codec/coarse/c2f
+                # but skip wavebeat (Lightning ckpt fails under torch
+                # weights_only safety). We don't need beat tracking for
+                # inpainting bridges.
+                from vampnet import download_codec, download_default
+                codec_path = download_codec()
+                coarse_path, c2f_path = download_default()
+                # Monkey-patch torch.load default while loading the codec
+                # so Lightning-pickled state-dicts go through.
+                import torch as _t
+                _orig_load = _t.load
+                def _patched(p, *a, **kw):
+                    kw.setdefault("weights_only", False)
+                    return _orig_load(p, *a, **kw)
+                _t.load = _patched
                 try:
-                    iface.codec.to(device)
-                    iface.coarse.to(device)
-                    if iface.c2f is not None:
-                        iface.c2f.to(device)
-                except Exception:
-                    pass
+                    iface = Interface(
+                        codec_ckpt=str(codec_path),
+                        coarse_ckpt=str(coarse_path),
+                        coarse2fine_ckpt=str(c2f_path),
+                        wavebeat_ckpt=None,
+                        device=device,
+                        compile=False,
+                    )
+                finally:
+                    _t.load = _orig_load
             _PIPE = {"interface": iface, "device": device,
                       "sr": getattr(iface, "codec", None) and
                             getattr(iface.codec, "sample_rate", 44100) or 44100}
