@@ -70,11 +70,14 @@ def cmd_plan(args: argparse.Namespace) -> None:
         # Persist Director JSON + pool diagnostic + narrative card next
         # to output mix.
         try:
-            out_path = getattr(args, 'out', None) or getattr(args, 'output', None)
+            out_path = (getattr(args, 'out', None) or
+                         getattr(args, 'output', None) or
+                         getattr(args, 'out_dir', None))
             if out_path:
                 from pathlib import Path as _P
                 import json as _json
-                out_parent = _P(out_path).parent
+                _op = _P(out_path)
+                out_parent = _op if (_op.is_dir() or not _op.suffix) else _op.parent
                 out_parent.mkdir(parents=True, exist_ok=True)
                 with open(out_parent / 'director.json', 'w') as _f:
                     _json.dump(director_out, _f, indent=2)
@@ -388,11 +391,14 @@ def cmd_all(args: argparse.Namespace) -> None:
         # Persist Director JSON + pool diagnostic + narrative card next
         # to output mix.
         try:
-            out_path = getattr(args, 'out', None) or getattr(args, 'output', None)
+            out_path = (getattr(args, 'out', None) or
+                         getattr(args, 'output', None) or
+                         getattr(args, 'out_dir', None))
             if out_path:
                 from pathlib import Path as _P
                 import json as _json
-                out_parent = _P(out_path).parent
+                _op = _P(out_path)
+                out_parent = _op if (_op.is_dir() or not _op.suffix) else _op.parent
                 out_parent.mkdir(parents=True, exist_ok=True)
                 with open(out_parent / 'director.json', 'w') as _f:
                     _json.dump(director_out, _f, indent=2)

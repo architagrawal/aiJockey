@@ -79,11 +79,31 @@ def main():
             continue
         for run_dir in sorted(runs_root.glob("run_*")):
             dj = run_dir / "director.json"
-            if not dj.exists():
-                continue
-            try:
-                plan = json.loads(dj.read_text())
-            except Exception:
+            tl = run_dir / "timeline.json"
+            plan: dict | None = None
+            if dj.exists():
+                try:
+                    plan = json.loads(dj.read_text())
+                except Exception:
+                    plan = None
+            if plan is None and tl.exists():
+                # Fallback: reconstruct minimal plan from executed timeline.
+                try:
+                    blob = json.loads(tl.read_text())
+                    tl_entries = blob.get("timeline") or []
+                    plan = {
+                        "text_prompt": (blob.get("meta") or {}).get("prompt"),
+                        "arc": (blob.get("meta") or {}).get("arc"),
+                        "transition_tiers": [
+                            (e.get("transition_in") or {}).get("tier", "minor")
+                            for e in tl_entries[1:]
+                        ],
+                        "clip_sequence": [e.get("clip_id") for e in tl_entries],
+                        "_from_timeline_fallback": True,
+                    }
+                except Exception:
+                    plan = None
+            if plan is None:
                 continue
             audio = _find_audio(run_dir)
             if not audio:
