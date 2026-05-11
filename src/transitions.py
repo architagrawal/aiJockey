@@ -33,23 +33,62 @@ def hp_filter(x: np.ndarray, sr: int, cutoff: float) -> np.ndarray:
     return np.stack([sosfilt(sos, ch) for ch in x])
 
 
-def equal_power_xfade(a: np.ndarray, b: np.ndarray, n: int) -> np.ndarray:
+def equal_power_xfade(a: np.ndarray, b: np.ndarray, n: int,
+                       sr: int = 44100,
+                       use_spec_mask: bool | None = None,
+                       use_beat_align: bool | None = None) -> np.ndarray:
     """
     Equal-power crossfade. a fades out, b fades in over n samples of overlap.
     Output length = a.shape[1] + b.shape[1] - n.
+
+    Two opt-in upgrades on top of time-domain equal-power:
+      - Spectrogram-mask blend in the overlap region (AIJOCKEY_SPEC_XFADE=1)
+        — avoids 1-8 kHz comb filtering.
+      - Beat-grid DTW + sub-sample phase fix on b's lead-in
+        (AIJOCKEY_BEAT_ALIGN=1) — kills phase cancellation.
+    Both default OFF until validated on droplet.
     """
+    import os as _xos
     n = min(n, a.shape[1], b.shape[1])
     if n <= 0:
         return np.concatenate([a, b], axis=1)
-    t = np.linspace(0, np.pi / 2, n)
-    fade_out = np.cos(t)
-    fade_in = np.sin(t)
+
+    if use_spec_mask is None:
+        use_spec_mask = _xos.environ.get("AIJOCKEY_SPEC_XFADE", "0") == "1"
+    if use_beat_align is None:
+        use_beat_align = _xos.environ.get("AIJOCKEY_BEAT_ALIGN", "0") == "1"
+
+    a_tail = a[:, -n:]
+    b_head = b[:, :n]
+
+    if use_beat_align:
+        try:
+            from beat_align import align_for_overlap
+            _, b_head = align_for_overlap(a_tail, b_head, sr=sr)
+        except Exception:
+            pass
+
+    if use_spec_mask and n >= 4096:
+        try:
+            from spec_crossfade import spectral_crossfade
+            blended = spectral_crossfade(a_tail, b_head, sr=sr)
+        except Exception:
+            blended = None
+    else:
+        blended = None
+
+    if blended is None:
+        t = np.linspace(0, np.pi / 2, n)
+        fade_out = np.cos(t)
+        fade_in = np.sin(t)
+        blended = (a_tail * fade_out + b_head * fade_in).astype(np.float32)
+
     out_len = a.shape[1] + b.shape[1] - n
     out = np.zeros((a.shape[0], out_len), dtype=np.float32)
     pre = a.shape[1] - n
     if pre > 0:
         out[:, :pre] = a[:, :pre]
-    out[:, pre:pre + n] = a[:, -n:] * fade_out + b[:, :n] * fade_in
+    out[:, pre:pre + n] = blended
     if b.shape[1] > n:
         out[:, pre + n:] = b[:, n:]
     return out

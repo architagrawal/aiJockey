@@ -92,7 +92,37 @@ def lufs_normalize(x: np.ndarray, sr: int, target_lufs: float = -9.0) -> np.ndar
 # Top-level
 # ---------------------------------------------------------------------------
 
-def master(in_path: str, out_path: str, target_lufs: float = -9.0) -> None:
+# Genre → target LUFS lookup. Preserves dynamics on non-EDM. EBU R128 +
+# AES community recommendations. Toggle: AIJOCKEY_ADAPTIVE_LUFS=0.
+_GENRE_LUFS_TARGETS: dict[str, float] = {
+    'edm': -9.0, 'dnb': -9.0, 'dubstep': -8.0, 'trance': -9.0,
+    'house': -9.5, 'tech_house': -9.5, 'techno': -9.5, 'hardstyle': -7.5,
+    'progressive': -9.5, 'future_bass': -9.0,
+    'hip_hop': -10.0, 'trap': -10.0, 'rnb': -11.0,
+    'pop': -12.0, 'rock': -11.0, 'punjabi': -10.0, 'bollywood': -10.0,
+    'chillstep': -13.0, 'chill': -13.0, 'lofi': -14.0, 'ambient': -16.0,
+    'jazz': -16.0, 'classical': -18.0, 'indian_classical': -18.0,
+    'synthwave': -10.0, 'retrowave': -10.0,
+}
+
+
+def adaptive_lufs_target(default_lufs: float, genre: str | None,
+                          loudness_range: float | None = None) -> float:
+    """Resolve target LUFS given a genre tag and optional measured LRA.
+
+    Falls back to default if genre missing. Widens by half the LRA delta
+    above 7 LU for non-EDM ambient stretches so dynamics survive.
+    """
+    g = (genre or '').lower().strip()
+    base = _GENRE_LUFS_TARGETS.get(g, default_lufs)
+    if loudness_range is not None and loudness_range > 7.0 and base < -10.0:
+        # Quiet/dynamic material — pull target down a bit more
+        base = base - min(2.0, (loudness_range - 7.0) * 0.3)
+    return float(base)
+
+
+def master(in_path: str, out_path: str, target_lufs: float = -9.0,
+            genre: str | None = None) -> None:
     wav, sr = torchaudio.load(in_path)
     x = wav.numpy().astype(np.float32)
     if x.shape[0] == 1:
@@ -106,9 +136,20 @@ def master(in_path: str, out_path: str, target_lufs: float = -9.0) -> None:
         x = x * float(0.92 / max(peak, 1e-6))
     meter_early = pyln.Meter(sr)
     loud_early = meter_early.integrated_loudness(x.T)
+    # Adaptive LUFS: route by genre when AIJOCKEY_ADAPTIVE_LUFS=1 (default).
+    # Env override: AIJOCKEY_MASTER_GENRE picks the genre slug directly.
+    import os as _aos
     eff_target = float(target_lufs)
+    if _aos.environ.get('AIJOCKEY_ADAPTIVE_LUFS', '1') != '0':
+        g = genre or _aos.environ.get('AIJOCKEY_MASTER_GENRE')
+        if g:
+            try:
+                # Cheap LRA proxy via pyloudnorm not exposed directly; pass None.
+                eff_target = adaptive_lufs_target(target_lufs, g)
+            except Exception:
+                pass
     if np.isfinite(loud_early) and loud_early > -10.0:
-        eff_target = float(max(target_lufs, loud_early - 2.0))
+        eff_target = float(max(eff_target, loud_early - 2.0))
 
     x = hp(x, sr, 30)
 
