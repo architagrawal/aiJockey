@@ -802,7 +802,9 @@ def list_featured():
     if not FEATURED_DIR.exists():
         return {"clips": []}
     out = []
-    for p in sorted(FEATURED_DIR.iterdir()):
+    for p in sorted(FEATURED_DIR.rglob("*")):
+        if not p.is_file():
+            continue
         if p.suffix.lower() not in (".mp3", ".wav", ".flac"):
             continue
         try:
@@ -812,19 +814,21 @@ def list_featured():
             continue
         if sz < 10240 or dur < 5:
             continue
+        rel = p.relative_to(FEATURED_DIR).as_posix()
         out.append({
-            "id": p.name,
+            "id": rel,
             "name": p.stem,
             "size_mb": round(sz / 1024 / 1024, 1),
             "duration_sec": round(dur, 1),
-            "url": f"/featured/{p.name}",
+            "url": f"/featured/{rel}",
         })
     return {"clips": out}
 
 
-@app.get("/featured/{filename}")
+@app.get("/featured/{filename:path}")
 def get_featured(filename: str):
-    """Serve a featured demo mp3. Path-traversal guarded."""
+    """Serve a featured demo mp3. Path-traversal guarded. Supports
+    nested subdir paths (e.g. _session3/01_PQ7.61_*.mp3)."""
     if not FEATURED_DIR.exists():
         raise HTTPException(404, detail="featured dir absent")
     p = FEATURED_DIR / filename

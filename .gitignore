@@ -101,3 +101,10 @@ datasets/dj_sets_mp3/
 datasets/critic.npz
 test_clips/
 test_out/
+# Big trained checkpoints — keep local only, restored via TEARDOWN_RUNBOOK
+checkpoints/*.pth
+checkpoints/*.tar.gz
+checkpoints/render_log.jsonl
+output/iter_refined_v*/raw_mix*.wav
+output/iter_baseline/*.wav
+output/featured_session/
