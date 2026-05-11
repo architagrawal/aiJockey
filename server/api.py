@@ -1672,6 +1672,35 @@ async def generate(
                              verdict=probe["verdict"],
                              severity=probe["overall_severity"])
 
+                        # VampNet glitch repair on probe-flagged junctions.
+                        # AIJOCKEY_VAMPNET_REPAIR=1, threshold via
+                        # AIJOCKEY_VAMPNET_REPAIR_THRESH (default 0.7).
+                        try:
+                            from vampnet_glitch_repair import (
+                                enabled as _vr_en,
+                                repair_glitch as _vr_repair,
+                            )
+                            if _vr_en():
+                                import soundfile as _sf
+                                thr = float(os.environ.get(
+                                    "AIJOCKEY_VAMPNET_REPAIR_THRESH", "0.7"))
+                                glitches = [j for j in (probe.get("junctions") or [])
+                                             if float(j.get("overall_severity", 0)) > thr]
+                                if glitches:
+                                    audio_arr, sr_repair = _sf.read(
+                                        wav_for_probe, always_2d=True)
+                                    arr = audio_arr.T.astype("float32")
+                                    for j in glitches[:5]:  # cap repairs/render
+                                        arr = _vr_repair(
+                                            arr, sr_repair,
+                                            float(j.get("time_sec", 0)))
+                                    _sf.write(wav_for_probe, arr.T, sr_repair)
+                                    jlog(job_id, "vampnet_repair", 0,
+                                         n_repaired=len(glitches[:5]))
+                        except Exception as _e:
+                            jlog(job_id, "vampnet_repair_skip", 0,
+                                 err=str(_e)[:200])
+
                         # CriticV2 advisory score header — works without
                         # checkpoint (returns None gracefully). Adds a
                         # second-opinion signal beyond probes; consumers

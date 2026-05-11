@@ -970,10 +970,34 @@ def apply_llm_transition_tiers_to_timeline(
     if not tiers:
         return
     intents = list(transition_intents) if transition_intents else []
+    # Optional genre-pair rules override — looks up (genre_a, genre_b) and
+    # forces preferred tier+technique. AIJOCKEY_GENRE_PAIR_RULES=1.
+    try:
+        from genre_pair_rules import enabled as _gp_en, lookup as _gp_lookup
+        gp_active = _gp_en()
+    except Exception:
+        gp_active = False; _gp_lookup = None
+
+    def _genre_for(idx: int) -> str | None:
+        try:
+            cid = timeline[idx].get("clip_id") or ""
+            return cid.split("__")[0].lower() if "__" in cid else None
+        except Exception:
+            return None
+
     for i in range(1, len(timeline)):
         j = i - 1
         tier = tiers[j % len(tiers)]
+        rule = None
+        if gp_active and _gp_lookup is not None:
+            rule = _gp_lookup(_genre_for(j), _genre_for(i))
+        if rule and rule.get("tier"):
+            tier = rule["tier"]
         tech = tier_to_technique(tier, j)
+        if rule and rule.get("tech"):
+            tech = dict(tech); tech["name"] = rule["tech"]
+            if rule.get("bars"):
+                tech["bars"] = rule["bars"]
         tech = _apply_restricted_filter(tech)
         if j < len(intents):
             tech["intent"] = intents[j]

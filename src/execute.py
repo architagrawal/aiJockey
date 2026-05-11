@@ -395,6 +395,13 @@ def render_segment(entry: dict, clips_meta: dict[str, dict],
     # Equalize lengths (rubberband can produce slightly different sample counts)
     min_len = min(s.shape[1] for s in processed.values())
     processed = {n: s[:, :min_len] for n, s in processed.items()}
+    # Per-stem LUFS norm (FxNorm pattern). Opt-in: AIJOCKEY_STEM_NORM=1.
+    try:
+        from stem_norm import enabled as _sn_en, normalize_stems as _sn_norm
+        if _sn_en():
+            processed = _sn_norm(processed, sr=SR)
+    except Exception:
+        pass
     # Instrumental-only mode (Phase 1 default): drop vocals stem from full mix
     # everywhere, not just overlap. Stems dict still holds vocals so accent
     # logic / future re-injection paths can reference them.
@@ -985,6 +992,13 @@ def execute(timeline_path: str, cache_dir: str, out_path: str,
         # On a 10-segment / 600s mix this reclaims ~200MB per step.
         rendered[i - 1] = None
 
+    # Crowd ambience overlay on low-energy frames. AIJOCKEY_CROWD_OVERLAY=1.
+    try:
+        from crowd_overlay import enabled as _co_en, overlay as _co_overlay
+        if _co_en():
+            output = _co_overlay(output, SR)
+    except Exception:
+        pass
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     torchaudio.save(out_path, torch.from_numpy(output.astype(np.float32)), SR)
     print(f"wrote {out_path} ({output.shape[1] / SR:.1f}s)")

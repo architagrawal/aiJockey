@@ -608,6 +608,7 @@ def run_director(
         try:
             best_plan = None
             best_score = float('-inf')
+            collected_plans: list[dict] = []
             for s_i in range(n_samples):
                 do_sample = n_samples > 1 or temperature > 0 and s_i > 0
                 if is_audio_model:
@@ -623,12 +624,72 @@ def run_director(
                 if not parsed:
                     continue
                 cand_plan = _sanitize_out(parsed, arc_fb, user_prompt, mt, coherence_hint)
+                collected_plans.append(cand_plan)
                 sc = _score_plan(cand_plan, arc_fb)
                 if sc > best_score:
                     best_score = sc
                     best_plan = cand_plan
                 if n_samples > 1:
                     print(f"[director] sample {s_i+1}/{n_samples} score={sc:.2f}")
+            # CLAP-text plan rerank — overrides best_plan if its choice
+            # aligns better with user_prompt semantics.
+            try:
+                from clap_director_rerank import (
+                    enabled as _clap_en,
+                    rerank_plans as _clap_rerank,
+                )
+                if _clap_en() and collected_plans:
+                    picked = _clap_rerank(collected_plans, user_prompt)
+                    if picked is not None:
+                        best_plan = picked
+                        print("[director] CLAP plan rerank picked alternative")
+            except Exception:
+                pass
+            # MERT-conditioned plan rerank — picks plan whose clip set
+            # has highest pre-computed MERT-predicted PQ/CE.
+            try:
+                from mert_plan_rerank import (
+                    enabled as _mp_en,
+                    rerank_plans as _mp_rerank,
+                )
+                if _mp_en() and collected_plans and clips_meta:
+                    cache_dir = os.environ.get(
+                        "AIJOCKEY_LIBRARY_CACHE", "/cache")
+                    pool_ids = list(clips_meta.keys())
+                    picked = _mp_rerank(collected_plans, pool_ids, cache_dir)
+                    if picked is not None:
+                        best_plan = picked
+                        print("[director] MERT plan rerank picked alternative")
+            except Exception:
+                pass
+            # Self-critique loop — Director evaluates and revises own plan.
+            try:
+                from director_critique import (
+                    enabled as _crit_en,
+                    critique_and_revise as _crit_rev,
+                )
+                if _crit_en() and best_plan is not None:
+                    def _crit_llm(msg: str) -> str:
+                        if is_audio_model:
+                            return _call_qwen2audio(msg, audio_clip_paths,
+                                                      model_id)
+                        return _call_hf_instruct(msg, model_id,
+                                                  do_sample=True,
+                                                  temperature=0.5)
+                    revised = _crit_rev(
+                        best_plan, _crit_llm,
+                        max_iters=int(os.environ.get(
+                            "AIJOCKEY_DIRECTOR_CRITIQUE_ITERS", "2")),
+                        score_fn=lambda p: _score_plan(p, arc_fb),
+                    )
+                    if revised is not None:
+                        best_plan = revised
+                        # Re-sanitize after revision
+                        best_plan = _sanitize_out(
+                            best_plan, arc_fb, user_prompt, mt, coherence_hint)
+                        print("[director] self-critique revised plan")
+            except Exception as _ce:
+                print(f"[director] critique skip: {_ce}")
             if best_plan is not None:
                 if n_samples > 1:
                     best_plan = dict(best_plan)

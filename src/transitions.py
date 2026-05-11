@@ -68,6 +68,29 @@ def equal_power_xfade(a: np.ndarray, b: np.ndarray, n: int,
         except Exception:
             pass
 
+    # Sidechain duck of A's low-mid by B's kick envelope. AIJOCKEY_SIDECHAIN_DUCK=1.
+    if _xos.environ.get("AIJOCKEY_SIDECHAIN_DUCK", "0") == "1":
+        try:
+            from sidechain import sidechain_overlap
+            a_tail = sidechain_overlap(a_tail, b_head, sr=sr)
+        except Exception:
+            pass
+    # Frequency-masking-aware duck on fight bands. AIJOCKEY_FREQ_DUCK=1.
+    if _xos.environ.get("AIJOCKEY_FREQ_DUCK", "0") == "1":
+        try:
+            from freq_mask_duck import freq_mask_duck
+            a_tail, b_head = freq_mask_duck(a_tail, b_head, sr=sr)
+        except Exception:
+            pass
+    # De-ess both overlapping signals. AIJOCKEY_DEESSER=1.
+    if _xos.environ.get("AIJOCKEY_DEESSER", "0") == "1":
+        try:
+            from deesser import deess
+            a_tail = deess(a_tail, sr=sr)
+            b_head = deess(b_head, sr=sr)
+        except Exception:
+            pass
+
     if use_spec_mask and n >= 4096:
         try:
             from spec_crossfade import spectral_crossfade
