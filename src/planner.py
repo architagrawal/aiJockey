@@ -792,6 +792,15 @@ def plan(clips: dict[str, dict], config: PlannerConfig) -> list[dict]:
                         )
                     except Exception:
                         pass
+                # MERT reward-head term: pre-computed predicted Audiobox PQ
+                # from the trained head ckpt. Toggle: AIJOCKEY_MERT_TERM=0.
+                if (config.cache_dir
+                        and _os.environ.get('AIJOCKEY_MERT_TERM', '1') == '1'):
+                    try:
+                        from library_picker_score import mert_lift_term
+                        score += mert_lift_term(config.cache_dir, cid)
+                    except Exception:
+                        pass
                 if is_surprise and st.surprises_used >= config.surprise_budget:
                     continue
                 scored_candidates.append((score, tech, is_surprise, cid, seg, seg_idx))

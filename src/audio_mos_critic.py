@@ -1,22 +1,26 @@
-"""AudioMOS DORA-MOS reference-free quality scorer.
+"""Audio MOS critic — AESCA fallback (AudioMOS DORA-MOS not released).
 
-Paper: AudioMOS Challenge 2025 (arXiv 2509.01336). MOS predictor trained
-for synthetic-audio quality estimation. Adds another head to our
-critic stack alongside Audiobox + MuQ-Eval.
+Research note (May 2026): DORA-MOS (AudioMOS Challenge 2025 winner) has
+NOT released code or weights. Treat any hardcoded `AudioMOS/DORA-MOS`
+ID as fictional.
 
-API mirrors audiobox_critic / muq_eval_critic.
+This wrapper points at AESCA (Track-2 winner of AudioMOS Challenge,
+github.com/CyberAgentAILab/aesca) instead. AESCA predicts the 4-axis
+Audiobox-aesthetics scores, so it's effectively a re-implementation of
+our existing critic — kept here only as a *second-opinion* head.
+
+If AESCA is unavailable in the environment, this module degrades to
+returning None so the rest of the pipeline ignores it.
 
 Env knobs:
-    AIJOCKEY_AUDIO_MOS_ENABLE   0|1   default 0
-    AIJOCKEY_AUDIO_MOS_MODEL    hf id default 'audiomos/dora-mos' (TODO verify on deploy)
-    AIJOCKEY_AUDIO_MOS_DEVICE   str   default 'cuda' if available
-
-Output: MOS scalar in [1, 5] (higher = better). Caller divides by 5 or
-keeps raw — same opaque-ratio handling as Audiobox PQ.
+    AIJOCKEY_AUDIO_MOS_ENABLE   0|1  default 0
+    AIJOCKEY_AESCA_REPO         path to cloned AESCA repo
+    AIJOCKEY_AESCA_CKPT         AESCA checkpoint .pt
 """
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from pathlib import Path
 
@@ -42,47 +46,46 @@ def _load(device: str | None = None):
             return _PIPE
         try:
             import torch
-            from transformers import AutoModel, AutoFeatureExtractor  # type: ignore
+            repo = os.environ.get("AIJOCKEY_AESCA_REPO")
+            ckpt = os.environ.get("AIJOCKEY_AESCA_CKPT")
+            if not repo or not Path(repo).exists():
+                print(f"[audio_mos/aesca] no repo at AIJOCKEY_AESCA_REPO={repo}")
+                _LOAD_FAILED = True
+                return None
+            if not ckpt or not Path(ckpt).exists():
+                print(f"[audio_mos/aesca] no ckpt at AIJOCKEY_AESCA_CKPT={ckpt}")
+                _LOAD_FAILED = True
+                return None
+            if repo not in sys.path:
+                sys.path.insert(0, repo)
+            from aesca.inference import load_model as _load_aesca  # type: ignore
             if device is None:
                 device = "cuda" if torch.cuda.is_available() else "cpu"
-            model_id = os.environ.get("AIJOCKEY_AUDIO_MOS_MODEL", "audiomos/dora-mos")
-            proc = AutoFeatureExtractor.from_pretrained(model_id, trust_remote_code=True)
-            model = AutoModel.from_pretrained(model_id, trust_remote_code=True)
-            model.eval()
-            if device == "cuda":
-                model = model.cuda()
-            _PIPE = {"model": model, "proc": proc, "device": device}
-            print(f"[audio_mos] loaded {model_id} on {device}")
+            model = _load_aesca(ckpt, device=device)
+            _PIPE = {"model": model, "device": device}
+            print(f"[audio_mos/aesca] loaded {ckpt} on {device}")
             return _PIPE
         except Exception as e:
-            print(f"[audio_mos] load failed ({e.__class__.__name__}: {e})")
+            print(f"[audio_mos/aesca] load failed: {e}")
             _LOAD_FAILED = True
             return None
 
 
 def score(audio_path: str | Path, device: str = "cuda") -> float | None:
-    """Returns MOS scalar (~1-5) or None."""
+    """Returns a MOS-like scalar (~1-5) or None. Aggregates AESCA's
+    4-axis output to a single scalar via (PQ+CE)/2 for parity."""
     if not enabled():
         return None
     pipe = _load(device=device)
     if pipe is None:
         return None
     try:
-        import torch
-        import librosa
-        wav, sr = librosa.load(str(audio_path), sr=16000, mono=True, duration=30.0)
-        inputs = pipe["proc"](wav, sampling_rate=sr, return_tensors="pt")
-        if pipe["device"] == "cuda":
-            inputs = {k: v.cuda() if hasattr(v, "cuda") else v for k, v in inputs.items()}
-        with torch.inference_mode():
-            out = pipe["model"](**inputs)
-        s = getattr(out, "mos", getattr(out, "scores", out))
-        if hasattr(s, "cpu"):
-            arr = s.cpu().squeeze().tolist()
-            if isinstance(arr, list):
-                return float(arr[0]) if arr else None
-            return float(arr)
-        return None
+        out = pipe["model"].score(str(audio_path))
+        if not out:
+            return None
+        pq = float(out.get("PQ", 0.0))
+        ce = float(out.get("CE", 0.0))
+        return (pq + ce) / 2.0
     except Exception as e:
-        print(f"[audio_mos] score failed for {audio_path}: {e}")
+        print(f"[audio_mos/aesca] score failed for {audio_path}: {e}")
         return None

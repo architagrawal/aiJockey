@@ -535,6 +535,66 @@ def audiobox_slice_term(cache_dir: 'str | Path', clip_id: str,
 
 
 # ---------------------------------------------------------------------------
+# #1e — MERT reward-head term (per-clip predicted Audiobox PQ/CE)
+# ---------------------------------------------------------------------------
+# Reads cache/<clip_id>.mert_pred.json sidecar with predicted PQ/PC/CE/CU
+# from the trained MERT-95M head (scripts/train_mert_reward.py).
+# Picker uses prediction as a "future PQ guess" before committing.
+
+_MERT_CACHE: dict[str, dict] = {}
+
+
+def _mert_sidecar_paths(cache_dir: 'str | Path', clip_id: str) -> list[Path]:
+    fname = f'{clip_id}.mert_pred.json'
+    out = [Path(cache_dir) / fname]
+    lib_cache = os.environ.get('AIJOCKEY_LIBRARY_CACHE') or '/cache'
+    lib = Path(lib_cache) / fname
+    if lib not in out:
+        out.append(lib)
+    return out
+
+
+def _load_mert_pred(cache_dir: 'str | Path', clip_id: str) -> dict:
+    key = f'{cache_dir}::{clip_id}'
+    if key in _MERT_CACHE:
+        return _MERT_CACHE[key]
+    blob: dict = {}
+    for p in _mert_sidecar_paths(cache_dir, clip_id):
+        if not p.exists():
+            continue
+        try:
+            blob = json.loads(p.read_text()) or {}
+            if blob:
+                break
+        except Exception:
+            continue
+    _MERT_CACHE[key] = blob
+    return blob
+
+
+def mert_lift_term(cache_dir: 'str | Path', clip_id: str,
+                    baseline: float = 6.0, strength: float = 0.35,
+                    axes: tuple[str, ...] = ('PQ', 'CE')) -> float:
+    """Score bonus from MERT-head predicted Audiobox PQ/CE for this clip.
+
+    Returns 0 when sidecar missing — cold-start neutral. Symmetric bonus
+    around `baseline` clamped to ±strength.
+    """
+    pred = _load_mert_pred(cache_dir, clip_id)
+    if not pred:
+        return 0.0
+    vals: list[float] = []
+    for ax in axes:
+        v = pred.get(ax)
+        if isinstance(v, (int, float)):
+            vals.append(float(v))
+    if not vals:
+        return 0.0
+    avg = sum(vals) / len(vals)
+    return float(strength * max(-1.0, min(1.0, (avg - baseline) / 2.0)))
+
+
+# ---------------------------------------------------------------------------
 # #4 — Probe-failure exclusion / blame decay
 # ---------------------------------------------------------------------------
 # When a junction's probe severity > threshold, BOTH clips at that junction
