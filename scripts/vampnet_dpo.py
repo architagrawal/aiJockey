@@ -124,6 +124,7 @@ def main():
 
     import torch
     import torch.nn.functional as F
+    import tempfile
 
     # Reference (frozen) coarse for DPO. deepcopy fails on weight_norm
     # parametrized modules; instead snapshot state_dict and create a
