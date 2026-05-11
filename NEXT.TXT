@@ -156,3 +156,170 @@ Tier 1 — high-impact, low-friction (do after demo ships)
   - MuQ-Eval (https://arxiv.org/html/2603.22677v1)
   - AudioMOS Challenge 2025 (https://arxiv.org/html/2509.01336v1)
   - Survey on Evaluation Metrics for Music Generation (https://arxiv.org/html/2509.00051v1)
+
+
+================================================================
+SESSION 2026-05-11 RESEARCH ADDITIONS — output-quality backlog
+================================================================
+3 parallel research agents fired:
+  (A) latest 2026 music gen + flow-matching beyond VampNet/SAO/ACE-Step
+  (B) RLHF beyond DPO (IPO/KTO/ORPO/SLiC/PRM/GRPO/RLAIF for small N)
+  (C) source separation + DJ-tooling SOTA 2025-2026
+
+Already shipped this session (don't re-do):
+  - 13 quality modules (sidechain, freq-mask, crowd, MS-widen, stem-norm,
+    LUFS-arc, BPM-grid, glitch-repair, critique, genre-rules, deesser,
+    CLAP-rerank, MERT-rerank) + 10 wired into call-sites.
+  - VampNet wrapper + pregrid + register (145 bridges in /cache).
+  - MERT-95M reward-head trained, sidecars on 83 clips.
+  - Adaptive LUFS, multi-Director sampling, _score_plan heuristic.
+  - TPS router, spectral_hold catalog entry, beat-align DTW phase fix,
+    spec-xfade STFT-domain crossfade.
+  - Matchering 2.0 master path + DeepAFx-ST wrapper.
+  - Stable Audio Open wrapper (gated on HF license accept).
+  - MuQ-Eval critic wrapper (real ID zhudi2825/MuQ-Eval-A1).
+  - DPO LoRA script extended w/ KTO + IPO + DPO-P loss variants.
+
+
+TIER 1 (drop-in upgrades, low friction, biggest near-term lift)
+----------------------------------------------------------------
+A. Mel-Band-RoFormer-v2 — swap weights only, same wrapper.
+   vocal SDR 11.93 → 12.4 (+0.5 dB). MIT.
+   Repo: ZFTurbo/Music-Source-Separation-Training.
+B. HTDemucs-6s — flag-enable in demucs main repo. Adds guitar+piano
+   stems. Free. MIT.
+C. PESTO F0 (SonyCSLParis/pesto, ISMIR'23) — 50× faster than CREPE,
+   equal accuracy (RPA 95%+). Replace CREPE. MIT.
+D. KTO training on accumulated render logs (already coded — flip
+   --loss-type kto when JSONL grows past ~50 labeled renders).
+   Beats DPO on our small/noisy regime, no pair construction needed.
+E. ACE-Step v1.5 (replaces v1) — strict superset, Apache, ROCm-blessed,
+   <4 GB VRAM, <2s/full-song on A100. Patch ace_step_wrapper.py to
+   point at ace-step/ACE-Step-1.5.
+F. All-In-One v1.1 (mir-aidj, retrained 2025) — drop-in. MIT.
+
+
+TIER 2 (new wrappers / scripts, ~half-day each)
+----------------------------------------------------------------
+G. DrumSep (inagoy/drumsep, MIT) — kick/snare/toms/hat/cymbals sub-stems.
+   Useful for drum_replace transition precision + sidechain trigger band.
+H. ChordFormer (Hyon/ChordFormer, ISMIR'24, Apache) — chord WCSR 84%
+   with confidence logits. Complements Camelot key on hip-hop/jazz.
+I. InspireMusic-1.5B-48kHz (FunAudioLLM, Apache) — Qwen2.5-based AR
+   transformer + super-res flow-matching head. AR = streamable, low-
+   latency. Bridge gen alternative to VampNet/ACE-Step.
+J. DiffRhythm 2 (ASLP-lab, Apache) — first open-weights flow-matching
+   song model. Long-form. Drop-in upgrade from DiffRhythm v1.
+K. SCNet-XL (amanteur/SCNet-XL, MIT) — 6-stem (voc/drum/bass/guitar/
+   piano/other), SDR 10.5/9.8. Alternative to Demucs/RoFormer ensemble.
+L. SimDPS retrieval-guided diffusion inpainting (arXiv 2509.16342,
+   Sep 2025) — uses our clip pool as retrieval corpus. R&D novelty.
+M. DAC latent slerp + refinement (descriptinc/descript-audio-codec, MIT)
+   — latent-space bridge. Pair with SimDPS for inpainting refinement.
+
+
+TIER 3 (heavier / research-grade, week-of-work)
+----------------------------------------------------------------
+N. PRM step-level reward shaping for Director plans — per-plan-step
+   Audiobox sub-scores. Lightman 2023 + Math-Shepherd 2024. Dense reward
+   beats outcome-only DPO/KTO. Requires step-level audio segmentation.
+O. GRPO + RLAIF with Audiobox as online reward (MusicRL pattern,
+   Meta 2024 arXiv:2402.04229). Skip preference pairs; render-and-score
+   per rollout. Long-term endgame.
+P. Constitutional self-rewarding (Bai 2022 + Self-Rewarding LM 2024) —
+   Director critiques own plans → synthetic preference pairs → expand
+   50 → 500 pairs before KTO/IPO. Data multiplier we already have via
+   director_critique.py — add pair-mining harness.
+Q. TRIA (oreillyp.github.io/tria, ISMIR'25) — DAC masked-LM for drum
+   bridges specifically. Complements VampNet (which is general).
+   Track for weight release.
+R. DJtransGAN port (ChenPaulYu, ICASSP'22) — 1-2d port. Replace rule-
+   based crossfade only IF render logs prove crossfade weakest tier
+   empirically.
+S. DJMix-100 dataset (Yamaha + mir-aidj 2025, CC-BY-4.0) — 100 pro
+   mixes annotated with cue-points + transition types. Train a
+   transition classifier head; align to Director's tier vocabulary.
+T. MERT/MusicFM cross-attention picker — replace CLAP-cosine clip-to-
+   prompt match with music-foundation features. MERT-v1-330M layer 6-8
+   mean pool. Music-aware vs text-music CLAP.
+U. SongGeneration 2 / LeVo 2 (Tencent, Apache, 4B, beats Suno v5).
+   Heavyweight; monitor, evaluate when stack is more mature.
+
+
+TIER 4 (operational / fixes / unblockers)
+----------------------------------------------------------------
+V. Fix vampnet_finetune.py dtype: coarse input is long (token ids) but
+   passed through Conv1d that expects float → cast inputs to long for
+   embedding lookup, NOT to conv path. Bug in our masked-LM loop.
+W. Fix vampnet_dpo.py: weight_norm modules block deepcopy of reference
+   coarse. Solution: state-dict snapshot + on-the-fly clone, not
+   deepcopy(module).
+X. Per-stem Audiobox prescore — current slice prescore is mix-only.
+   Adding per-stem (drums/bass/other) PQ predictions could improve
+   stem_swap picker.
+Y. lufs_arc.py wire into master.py per-segment (currently unwired —
+   needs master() to accept segment energy hint).
+Z. Library audio recovery alt source — YouTube yt-dlp bot-blocked.
+   Try: Spotify-via-Spotdl, Internet Archive mirror search, MusicBrainz
+   + acoustid fingerprint. Or replace lost library entirely with
+   ACE-Step v1.5 generated CC-clean alternates.
+AA. AESCA install for 3rd critic (CyberAgentAILab/aesca, AudioMOS
+    Challenge 2025 Track-2 winner). Apache. DORA-MOS not released.
+
+
+SKIP PERMANENTLY (verified not viable)
+----------------------------------------------------------------
+- MelodyFlow (CC-BY-NC blocked)
+- MusicGen audiocraft (CC-BY-NC blocked)
+- Riffusion (quality too low)
+- MusicLM (no public weights)
+- LarsNet drums sub-stems (CC-BY-NC blocked)
+- TempoCNN (AGPL)
+- BandIt-v2 (cinematic stems, wrong domain)
+- Open-Unmix streaming (SDR gap too big vs RoFormer)
+- MAGNeT (CC-BY-NC blocked)
+- EDMFormer (no public ckpt as of 2026Q2)
+- SLiC-HF (superseded by IPO/DPO-P)
+- ORPO (Qwen already instruction-tuned; marginal)
+- Stable Audio Open (gated, needs manual HF license accept)
+
+
+SOURCES added 2026-05-11
+----------------------------------------------------------------
+- ACE-Step 1.5 (https://github.com/ace-step/ACE-Step-1.5)
+- DiffRhythm 2 (https://huggingface.co/ASLP-lab/DiffRhythm2)
+- SongGeneration (https://huggingface.co/tencent/SongGeneration)
+- InspireMusic-1.5B (https://huggingface.co/FunAudioLLM/InspireMusic-1.5B)
+- TRIA (https://oreillyp.github.io/tria/) + arXiv 2509.15625
+- VampNet (https://github.com/hugofloresgarcia/vampnet)
+- KTO (Ethayarajh 2024, arXiv:2402.01306) — TRL KTOTrainer
+- IPO (Azar 2023, arXiv:2310.12036) — TRL DPOConfig loss_type=ipo
+- DPO-P (Pal 2024, arXiv:2402.13228) — TRL loss_type=dpop
+- GRPO (DeepSeek, arXiv:2501.12948) — TRL GRPOTrainer
+- MR-FlowDPO (arXiv:2512.10264) — multi-reward DPO for music
+- MusicRL (Meta, arXiv:2402.04229) — RLAIF for music gen
+- LeVo (arXiv:2506.07520) — multi-preference song generation
+- SimDPS (arXiv:2509.16342) — similarity-guided diffusion inpainting
+- Mel-Band-RoFormer-v2 weights (ZFTurbo/Music-Source-Separation-Training)
+- SCNet-XL (amanteur/SCNet-XL)
+- PESTO F0 (SonyCSLParis/pesto)
+- DrumSep (inagoy/drumsep)
+- ChordFormer (Hyon/ChordFormer, ISMIR'24)
+- DJMix-100 dataset (Yamaha + mir-aidj 2025)
+- Matchering 2.0 (sergree/matchering)
+- DeepAFx-ST (Adobe Research, arXiv:2207.08759)
+- Stable Audio Open paper (arXiv:2407.14358)
+- DAC paper (arXiv:2306.06546)
+
+
+PRIORITY ORDER (next session)
+----------------------------------------------------------------
+Highest output-quality ROI:
+  1. Tier-1 A/B/C/F drop-ins (~half day total).
+  2. Tier-1 E (ACE-Step v1.5) replace ACE-Step v1 wrapper.
+  3. Tier-4 V+W fix VampNet finetune/DPO bugs.
+  4. KTO training run when render-log has >= 50 labeled rows.
+  5. Tier-2 G/H/I wrappers (DrumSep, ChordFormer, InspireMusic).
+  6. Tier-2 L (SimDPS) — R&D experiment.
+  7. Tier-3 N (PRM step-level) — biggest long-term lever.
+  8. Tier-3 O (GRPO + RLAIF) — endgame after PRM matures.
