@@ -999,6 +999,59 @@
       "vocal_safe": true
     },
     {
+      "name": "echo_throw",
+      "category": "fx",
+      "tier": "major",
+      "implementation_status": "implemented",
+      "typical_bars": [
+        2,
+        4
+      ],
+      "best_for": [
+        "outro",
+        "breakdown",
+        "verse"
+      ],
+      "incompatible_with": [
+        "drop",
+        "chorus"
+      ],
+      "description": "Outgoing's last 1-2 bars caught in 3/4-dotted delay with 0.55 feedback; dry signal fades while wet tail cascades over incoming intro. Classic pro-DJ echo-out. Uses src/echo_throw.py.",
+      "params": {
+        "bars": "int",
+        "feedback": "float",
+        "wet_db": "float"
+      },
+      "vocal_safe": true
+    },
+    {
+      "name": "beat_juggle",
+      "category": "loop",
+      "tier": "loop",
+      "implementation_status": "implemented",
+      "typical_bars": [
+        1,
+        2
+      ],
+      "best_for": [
+        "pre_drop",
+        "build_up",
+        "drop"
+      ],
+      "incompatible_with": [
+        "intro",
+        "outro",
+        "breakdown"
+      ],
+      "description": "Loop last bar of outgoing, halve subdivision (1 -> 1/2 -> 1/4 -> 1/8) over 4 steps, snap to incoming on resolution. Tension peak before drop. Uses src/beat_juggle.py.",
+      "params": {
+        "start_subdivision": "float",
+        "end_subdivision": "float",
+        "n_steps": "int"
+      },
+      "vocal_safe": false
+    },
+    {
       "name": "spectral_hold",
       "category": "spectral",
       "tier": "major",

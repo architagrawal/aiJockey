@@ -465,6 +465,18 @@ def cmd_all(args: argparse.Namespace) -> None:
             _bg_snap(tl)
     except Exception:
         pass
+    # Section-pair validator — refuse / downgrade illegal section
+    # transitions (drop->drop without double-drop, breakdown crater).
+    # AIJOCKEY_SECTION_PAIR_VALIDATOR=1.
+    try:
+        from section_pair_validator import (
+            enabled as _spv_en,
+            filter_timeline as _spv_filter,
+        )
+        if _spv_en():
+            _spv_filter(tl)
+    except Exception:
+        pass
 
     # Apply Director-suggested transition tiers + accent hints if requested
     if director_out is not None and getattr(args, 'apply_llm_tiers', False):

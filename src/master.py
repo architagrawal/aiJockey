@@ -183,6 +183,14 @@ def master(in_path: str, out_path: str, target_lufs: float = -9.0,
         x = compress(x, threshold_db=-8, ratio=1.8, sr=sr).astype(np.float32)
     else:
         x = compress(x, threshold_db=-12, ratio=2.0, sr=sr).astype(np.float32)
+    # EDM 'smile' EQ — boost lows + highs, scoop mids. Opt-in via
+    # AIJOCKEY_SMILE_EQ=1.
+    try:
+        from edm_smile_eq import enabled as _se_en, apply as _se_apply
+        if _se_en():
+            x = _se_apply(x, sr=sr)
+    except Exception:
+        pass
     x = lufs_normalize(x, sr, eff_target).astype(np.float32)
     # Mid/Side stereo widener — opt-in via AIJOCKEY_MS_WIDEN=1.
     try:

@@ -985,6 +985,13 @@ def apply_llm_transition_tiers_to_timeline(
         except Exception:
             return None
 
+    # Genre-aware bar count via genre_phrase. AIJOCKEY_GENRE_PHRASE=1.
+    try:
+        from genre_phrase import enabled as _gph_en, transition_bars as _gph_bars
+    except Exception:
+        _gph_en = lambda: False
+        _gph_bars = None
+
     for i in range(1, len(timeline)):
         j = i - 1
         tier = tiers[j % len(tiers)]
@@ -998,6 +1005,8 @@ def apply_llm_transition_tiers_to_timeline(
             tech = dict(tech); tech["name"] = rule["tech"]
             if rule.get("bars"):
                 tech["bars"] = rule["bars"]
+        if _gph_en() and _gph_bars is not None and "bars" not in tech:
+            tech["bars"] = _gph_bars(_genre_for(j), _genre_for(i), tier)
         tech = _apply_restricted_filter(tech)
         if j < len(intents):
             tech["intent"] = intents[j]
