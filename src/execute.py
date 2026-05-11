@@ -886,6 +886,63 @@ def apply_transition(output: np.ndarray, prev: dict, cur: dict,
         reps = int(tech.get('repetitions', 2))
         looped = T.loop_callback(cur['full'], reps)
         return _done(T.cut_transition(output, looped))
+    if name == 'echo_throw':
+        try:
+            from echo_throw import echo_throw_transition
+            out = echo_throw_transition(
+                output, cur['full'], SR, bars=bars, beat_dur=beat_dur,
+                feedback=float(tech.get('feedback', 0.55)),
+                wet_db=float(tech.get('wet_db', -3.0)),
+            )
+            return _done(out)
+        except Exception as _e:
+            print(f"[execute] echo_throw fail: {_e}")
+    if name == 'beat_juggle':
+        try:
+            from beat_juggle import beat_juggle_transition
+            out = beat_juggle_transition(
+                output, cur['full'], SR, beat_dur,
+                start_subdivision=float(tech.get('start_subdivision', 1.0)),
+                end_subdivision=float(tech.get('end_subdivision', 0.125)),
+                n_steps=int(tech.get('n_steps', 4)),
+            )
+            return _done(out)
+        except Exception as _e:
+            print(f"[execute] beat_juggle fail: {_e}")
+    if name == 'acapella_overlay':
+        try:
+            from acapella_overlay import acapella_overlay
+            prev_stems = prev.get("stems") or {}
+            cur_stems = cur.get("stems") or {}
+            overlay = acapella_overlay(prev_stems, cur_stems, SR,
+                                        bars=int(tech.get('bars', bars)),
+                                        beat_dur=beat_dur)
+            return _done(np.concatenate([output, overlay, cur['full']],
+                                          axis=1).astype(np.float32))
+        except Exception as _e:
+            print(f"[execute] acapella_overlay fail: {_e}")
+    if name == 'reverse_reverb_impact':
+        try:
+            from reverse_reverb import reverse_reverb_pre_impact
+            tail = output[:, -int(2 * beat_dur * SR):]
+            swell = reverse_reverb_pre_impact(tail, SR,
+                                                decay_s=float(tech.get('decay_s', 1.8)))
+            return _done(np.concatenate([output, swell, cur['full']],
+                                          axis=1).astype(np.float32))
+        except Exception as _e:
+            print(f"[execute] reverse_reverb fail: {_e}")
+    if name == 'spectral_hold':
+        try:
+            from spectral_hold import spectral_hold_transition
+            out = spectral_hold_transition(
+                output, cur['full'], SR,
+                hold_seconds=float(tech.get('hold_seconds',
+                                              max(1.0, bars * 4 * beat_dur * 0.25))),
+                xfade_seconds=float(tech.get('xfade_seconds', 0.5)),
+            )
+            return _done(out)
+        except Exception as _e:
+            print(f"[execute] spectral_hold fail: {_e}")
     return _done(T.crossfade_transition(output, cur['full'], SR, bars, beat_dur))
 
 

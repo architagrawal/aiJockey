@@ -34,7 +34,7 @@ def rerank_plans(plans: list[dict], user_prompt: str) -> dict | None:
     if not enabled() or not plans:
         return None
     try:
-        from clap_wrapper import text_embedding   # type: ignore
+        from clap_wrapper import get_text_embedding as text_embedding  # type: ignore
         import numpy as np
         prompt_emb = text_embedding(user_prompt or "")
         if prompt_emb is None:

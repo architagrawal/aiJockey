@@ -951,29 +951,6 @@
       "vocal_safe": true
     },
     {
-      "name": "spectral_hold",
-      "category": "spectral",
-      "tier": "major",
-      "implementation_status": "implemented",
-      "typical_bars": [
-        2,
-        4
-      ],
-      "best_for": [
-        "bridge",
-        "break"
-      ],
-      "incompatible_with": [
-        "drop"
-      ],
-      "description": "Freeze harmonic content (FFT magnitude) of outgoing's last bar; hold while drums change. Glue layer for cross-genre jumps. Cited NEXT.TXT as cheap rule-based phase-cancel mitigation.",
-      "params": {
-        "bars": "int",
-        "phase_randomize": "bool"
-      },
-      "vocal_safe": false
-    },
-    {
       "name": "neural_bridge",
       "category": "generative",
       "tier": "major",
