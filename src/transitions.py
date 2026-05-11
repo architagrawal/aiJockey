@@ -68,22 +68,33 @@ def equal_power_xfade(a: np.ndarray, b: np.ndarray, n: int,
         except Exception:
             pass
 
-    # Sidechain duck of A's low-mid by B's kick envelope. AIJOCKEY_SIDECHAIN_DUCK=1.
-    if _xos.environ.get("AIJOCKEY_SIDECHAIN_DUCK", "0") == "1":
+    # FX orchestrator: mutex pairs + per-set budget. Replaces direct
+    # env checks with junction-aware orchestration so we don't stack.
+    try:
+        from fx_orchestrator import is_fx_active, junction_gets_fx
+        _jidx = int(_xos.environ.get("AIJOCKEY_CURRENT_JUNCTION_IDX", "0"))
+        _budget_ok = junction_gets_fx(_jidx, total_junctions=8)
+    except Exception:
+        def is_fx_active(e, _j, _g=None):
+            return _xos.environ.get(e, "0") == "1"
+        _budget_ok = True
+
+    if _budget_ok and is_fx_active("AIJOCKEY_SIDECHAIN_DUCK", _jidx,
+                                      "overlap_processing"):
         try:
             from sidechain import sidechain_overlap
             a_tail = sidechain_overlap(a_tail, b_head, sr=sr)
         except Exception:
             pass
-    # Frequency-masking-aware duck on fight bands. AIJOCKEY_FREQ_DUCK=1.
-    if _xos.environ.get("AIJOCKEY_FREQ_DUCK", "0") == "1":
+    if _budget_ok and is_fx_active("AIJOCKEY_FREQ_DUCK", _jidx,
+                                      "overlap_processing"):
         try:
             from freq_mask_duck import freq_mask_duck
             a_tail, b_head = freq_mask_duck(a_tail, b_head, sr=sr)
         except Exception:
             pass
-    # De-ess both overlapping signals. AIJOCKEY_DEESSER=1.
-    if _xos.environ.get("AIJOCKEY_DEESSER", "0") == "1":
+    if _budget_ok and is_fx_active("AIJOCKEY_DEESSER", _jidx,
+                                      "vocal_clarity"):
         try:
             from deesser import deess
             a_tail = deess(a_tail, sr=sr)
