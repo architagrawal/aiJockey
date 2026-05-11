@@ -458,6 +458,14 @@ def cmd_all(args: argparse.Namespace) -> None:
     else:
         tl = plan(clips, cfg)
 
+    # Beat-grid BPM normalization — opt-in via AIJOCKEY_BPM_GRID=1.
+    try:
+        from bpm_grid import enabled as _bg_en, snap_timeline as _bg_snap
+        if _bg_en():
+            _bg_snap(tl)
+    except Exception:
+        pass
+
     # Apply Director-suggested transition tiers + accent hints if requested
     if director_out is not None and getattr(args, 'apply_llm_tiers', False):
         tiers = director_out.get('transition_tiers') or []

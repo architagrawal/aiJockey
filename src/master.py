@@ -184,6 +184,13 @@ def master(in_path: str, out_path: str, target_lufs: float = -9.0,
     else:
         x = compress(x, threshold_db=-12, ratio=2.0, sr=sr).astype(np.float32)
     x = lufs_normalize(x, sr, eff_target).astype(np.float32)
+    # Mid/Side stereo widener — opt-in via AIJOCKEY_MS_WIDEN=1.
+    try:
+        from ms_widener import enabled as _ms_en, widen as _ms_widen
+        if _ms_en():
+            x = _ms_widen(x)
+    except Exception:
+        pass
     x = limit(x, ceiling_db=-1.0, sr=sr).astype(np.float32)
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
