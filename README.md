@@ -1,10 +1,13 @@
-# AiJockey — Getting Started
+# AiJockey
 
-AI DJ set generator. Builds cohesive mixes from clip pool with pro-DJ transitions.
+An end-to-end AI DJ. It separates stems, reads musical structure, plans the set, renders transitions with 25+ DSP techniques and masters the final mix. Built to run on an AMD MI300X with ROCm, ported off CUDA.
 
-Full architecture + design + code: see [AiJockey.md](AiJockey.md).
+- **Analysis**: Demucs stem separation, then BPM, key and phrase detection per track.
+- **Planning**: a key-aware beam-search planner picks the track order and the transition for each pair, using the Camelot wheel for harmonic mixing.
+- **Rendering**: DSP transitions and LUFS mastering in one FastAPI service.
+- **Stack**: Python, PyTorch, FastAPI, ROCm.
 
-This README = practical onboarding: how to develop, what data, how to use AMD GPU.
+Architecture and design: [AiJockey.md](AiJockey.md). The rest of this README is developer onboarding.
 
 **License**: [AGPL-3.0-or-later](LICENSE). Forks (including network-served versions like SaaS) must remain open-source under the same license.
 
